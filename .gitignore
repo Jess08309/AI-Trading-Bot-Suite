@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Trading Bot Data (Sensitive)
+cdp_api_key.json
+coinbase API.txt
+.env
+.env.*
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+*_temp.py
+trading_engine_temp.py
+
+# AI Model Files (too large for git)
+trade_model.joblib
+models/*.joblib
+data/models/*.joblib
+data/models/market_model.joblib
+
+# Large data files
+data/historical/
+data/backtest/*.txt
+data/backtest/*.csv
+data/state/
+data/history/price_history.csv
+tools/backtests/data/minute_prices.csv
+tools/backtests/data/hourly_prices.csv
+
+# Foundation backup models
+_FOUNDATION_V5_*/models/*.joblib
+_FOUNDATION_V5_*/models/*.pt
+
+# Logs
+logs/
+*.log
+
+# VSCode
+.vscode/*
+!.vscode/settings.json
+!.copilot-instructions.md
+
+# Local backup archives
+_BACKUPS/*.zip
+
+# Large local installer artifacts
+_ARCHIVE/installers/*.exe
+
+# Alpaca keys
+alpaca_keys.json
+*.pem

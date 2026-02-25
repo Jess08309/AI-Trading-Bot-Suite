@@ -1,0 +1,13 @@
+{
+  "timestamp": "20260213_003412",
+  "train_accuracy": 0.6311235170969993,
+  "test_accuracy": 0.8903000697836706,
+  "top_features": {
+    "volatility": 0.09991862641537781,
+    "bb_width": 0.07003492995505149,
+    "ema_cross": 0.06369529905470292,
+    "roc_20": 0.05870598398150694,
+    "rsi_14": 0.05631962518602998
+  },
+  "version_path": "C:/Master Chess\\data\\models\\market_model_20260213_003412_acc89%.joblib"
+}

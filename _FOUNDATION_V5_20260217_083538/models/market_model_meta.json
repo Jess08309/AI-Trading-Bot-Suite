@@ -1,0 +1,13 @@
+{
+  "timestamp": "20260210_013836",
+  "train_accuracy": 0.5562400255346314,
+  "test_accuracy": 0.6650175550590488,
+  "top_features": {
+    "rsi_14": 0.13007078627521582,
+    "atr_14": 0.11809992219807898,
+    "bb_width": 0.0971953079969688,
+    "volatility": 0.0704392853773309,
+    "vol_ratio": 0.059366985361321505
+  },
+  "version_path": "data/models\\market_model_20260210_013836_acc67%.joblib"
+}

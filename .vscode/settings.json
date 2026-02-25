@@ -1,0 +1,20 @@
+{
+  // GitHub Copilot Agentic Memory - Enabled
+  "github.copilot.chat.agenticMemory.enabled": true,
+  "github.copilot.chat.agenticMemory.scope": "workspace",
+  
+  // Enhanced context for your trading bot
+  "github.copilot.chat.codeGeneration.useInstructionFiles": true,
+  
+  // Python-specific settings for better Copilot suggestions
+  "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.autoImportCompletions": true,
+  
+  // Copilot suggestions optimized for trading logic
+  "github.copilot.enable": {
+    "*": true,
+    "python": true,
+    "plaintext": false,
+    "markdown": true
+  }
+}

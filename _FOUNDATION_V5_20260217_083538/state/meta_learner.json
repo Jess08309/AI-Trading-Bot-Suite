@@ -1,0 +1,648 @@
+{
+  "buy_threshold": 0.5420664756751021,
+  "sell_threshold": 0.4579335243248979,
+  "model_weights": {
+    "ml_model": 0.3235294117647059,
+    "sentiment": 0.3088235294117647,
+    "rl_agent": 0.36764705882352944
+  },
+  "model_history": {
+    "ml_model": [
+      {
+        "prediction": 0.6604732438509968,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-07T21:53:53.643950+00:00"
+      },
+      {
+        "prediction": 0.5592074419387247,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-07T22:45:33.691655+00:00"
+      },
+      {
+        "prediction": 0.6123227832914844,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-07T23:21:42.695376+00:00"
+      },
+      {
+        "prediction": 0.29027460793682325,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-08T08:31:01.659983+00:00"
+      },
+      {
+        "prediction": 0.09723740614372105,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-08T08:32:17.259312+00:00"
+      },
+      {
+        "prediction": 0.3879847357806609,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-08T08:33:32.265831+00:00"
+      },
+      {
+        "prediction": 0.5835310192785534,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-08T09:35:52.649538+00:00"
+      },
+      {
+        "prediction": 0.3370535868668074,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-08T15:00:31.538053+00:00"
+      },
+      {
+        "prediction": 0.2557000000437823,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-08T16:48:59.666669+00:00"
+      },
+      {
+        "prediction": 0.3077133335853911,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-08T16:50:12.725996+00:00"
+      },
+      {
+        "prediction": 0.43367894448934696,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-08T17:28:53.621758+00:00"
+      },
+      {
+        "prediction": 0.22748377479193885,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-08T18:36:10.973626+00:00"
+      },
+      {
+        "prediction": 0.617788885926716,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-09T09:24:23.445977+00:00"
+      },
+      {
+        "prediction": 0.5319143013384956,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-09T09:24:23.542273+00:00"
+      },
+      {
+        "prediction": 0.5888160782209425,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-09T10:14:50.939027+00:00"
+      },
+      {
+        "prediction": 0.032300654145977624,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-09T16:47:02.684663+00:00"
+      },
+      {
+        "prediction": 0.27994352250502447,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-09T17:42:53.874508+00:00"
+      },
+      {
+        "prediction": 0.6762209821428571,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-09T18:09:31.562348+00:00"
+      },
+      {
+        "prediction": 0.6762209821428571,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-09T18:13:12.489201+00:00"
+      },
+      {
+        "prediction": 0.6725625,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-09T18:13:12.557982+00:00"
+      },
+      {
+        "prediction": 0.4070163968540085,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-09T19:32:33.197016+00:00"
+      },
+      {
+        "prediction": 0.657640625,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-09T20:15:29.580728+00:00"
+      },
+      {
+        "prediction": 0.6738106740463636,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-09T21:07:41.075278+00:00"
+      },
+      {
+        "prediction": 0.5778844484978642,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-09T22:02:22.995960+00:00"
+      },
+      {
+        "prediction": 0.6381287307246494,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-09T22:22:03.451713+00:00"
+      },
+      {
+        "prediction": 0.591909991551205,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-09T22:26:44.212174+00:00"
+      },
+      {
+        "prediction": 0.5814275648446563,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-09T23:22:33.864970+00:00"
+      },
+      {
+        "prediction": 0.5618155622697127,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-10T01:08:44.304578+00:00"
+      },
+      {
+        "prediction": 0.557237484673147,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T01:08:44.371679+00:00"
+      },
+      {
+        "prediction": 0.6316799969810114,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-10T01:20:23.113039+00:00"
+      },
+      {
+        "prediction": 0.5826430166967846,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T01:20:23.202445+00:00"
+      },
+      {
+        "prediction": 0.6601599023073078,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T01:58:52.634818+00:00"
+      },
+      {
+        "prediction": 0.6529044124714565,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-10T01:58:52.717662+00:00"
+      },
+      {
+        "prediction": 0.551731231988386,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T02:47:34.854290+00:00"
+      },
+      {
+        "prediction": 0.559789618464411,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T02:47:34.892982+00:00"
+      },
+      {
+        "prediction": 0.743091616180651,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T02:47:34.950625+00:00"
+      },
+      {
+        "prediction": 0.7499831390767154,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T03:04:54.796438+00:00"
+      },
+      {
+        "prediction": 0.6587930521091812,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T03:17:37.480747+00:00"
+      },
+      {
+        "prediction": 0.7019637356313045,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T03:17:37.578876+00:00"
+      },
+      {
+        "prediction": 0.5672857138716281,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T03:17:37.692041+00:00"
+      },
+      {
+        "prediction": 0.6588722937233432,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T03:17:37.788585+00:00"
+      },
+      {
+        "prediction": 0.5605114861324373,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T03:26:56.415071+00:00"
+      },
+      {
+        "prediction": 0.7028666174520519,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T03:29:15.329957+00:00"
+      },
+      {
+        "prediction": 0.5796370420235317,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-10T03:29:15.444605+00:00"
+      },
+      {
+        "prediction": 0.613012864047176,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T03:30:24.368633+00:00"
+      },
+      {
+        "prediction": 0.6375625445697654,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T04:08:39.800186+00:00"
+      },
+      {
+        "prediction": 0.5517248160127302,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T04:08:39.875437+00:00"
+      },
+      {
+        "prediction": 0.6536627434444455,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T04:20:17.198502+00:00"
+      },
+      {
+        "prediction": 0.816572644097128,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T05:45:58.683050+00:00"
+      },
+      {
+        "prediction": 0.2581830757907294,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-10T09:57:38.681852+00:00"
+      }
+    ],
+    "sentiment": [
+      {
+        "prediction": 0.4592414037575328,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-07T21:53:53.643950+00:00"
+      },
+      {
+        "prediction": 0.45250462798849894,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-07T22:45:33.691655+00:00"
+      },
+      {
+        "prediction": 0.8357513883965497,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-07T23:21:42.695376+00:00"
+      },
+      {
+        "prediction": 0.45516827258762743,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-08T08:31:01.659983+00:00"
+      },
+      {
+        "prediction": 0.22405048177628828,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-08T08:32:17.259312+00:00"
+      },
+      {
+        "prediction": 0.4188581740839805,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-08T08:33:32.265831+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-08T09:35:52.649538+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-08T15:00:31.538053+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-08T16:48:59.666669+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-08T16:50:12.725996+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-08T17:28:53.621758+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-08T18:36:10.973626+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-09T09:24:23.445977+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-09T09:24:23.542273+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-09T10:14:50.939027+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-09T16:47:02.684663+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-09T17:42:53.874508+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-09T18:09:31.562348+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-09T18:13:12.489201+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-09T18:13:12.557982+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-09T19:32:33.197016+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-09T20:15:29.580728+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-09T21:07:41.075278+00:00"
+      },
+      {
+        "prediction": 0.45938916459884205,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-09T22:02:22.995960+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-09T22:22:03.451713+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-09T22:26:44.212174+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-09T23:22:33.864970+00:00"
+      },
+      {
+        "prediction": 0.5287013685239492,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-10T01:08:44.304578+00:00"
+      },
+      {
+        "prediction": 0.602741935483871,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T01:08:44.371679+00:00"
+      },
+      {
+        "prediction": 0.6601666666666667,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-10T01:20:23.113039+00:00"
+      },
+      {
+        "prediction": 0.5773333333333334,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T01:20:23.202445+00:00"
+      },
+      {
+        "prediction": 0.729,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T01:58:52.634818+00:00"
+      },
+      {
+        "prediction": 0.694,
+        "outcome": 1.0,
+        "correct": true,
+        "timestamp": "2026-02-10T01:58:52.717662+00:00"
+      },
+      {
+        "prediction": 0.6444731182795699,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T02:47:34.854290+00:00"
+      },
+      {
+        "prediction": 0.511021505376344,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T02:47:34.892982+00:00"
+      },
+      {
+        "prediction": 0.7395564516129032,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T02:47:34.950625+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-10T03:04:54.796438+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-10T03:17:37.480747+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-10T03:17:37.578876+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-10T03:17:37.692041+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-10T03:17:37.788585+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-10T03:26:56.415071+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-10T03:29:15.329957+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-10T03:29:15.444605+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-10T03:30:24.368633+00:00"
+      },
+      {
+        "prediction": 0.5648745519713262,
+        "outcome": 0.0,
+        "correct": false,
+        "timestamp": "2026-02-10T04:08:39.800186+00:00"
+      },
+      {
+        "prediction": 0.45698924731182794,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-10T04:08:39.875437+00:00"
+      },
+      {
+        "prediction": 0.45698924731182794,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-10T04:20:17.198502+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 0.0,
+        "correct": true,
+        "timestamp": "2026-02-10T05:45:58.683050+00:00"
+      },
+      {
+        "prediction": 0.5,
+        "outcome": 1.0,
+        "correct": false,
+        "timestamp": "2026-02-10T09:57:38.681852+00:00"
+      }
+    ],
+    "rl_agent": []
+  },
+  "threshold_history": [
+    {
+      "timestamp": "2026-02-06T23:43:31.448552+00:00",
+      "win_rate": 66.66666666666666,
+      "buy_threshold": 0.5466666666666667,
+      "sell_threshold": 0.45333333333333337
+    },
+    {
+      "timestamp": "2026-02-07T09:45:04.533313+00:00",
+      "win_rate": 52.42718446601942,
+      "buy_threshold": 0.5461812297734628,
+      "sell_threshold": 0.45381877022653727
+    },
+    {
+      "timestamp": "2026-02-07T21:22:16.658488+00:00",
+      "win_rate": 55.00000000000001,
+      "buy_threshold": 0.5451812297734628,
+      "sell_threshold": 0.4548187702265373
+    },
+    {
+      "timestamp": "2026-02-10T01:47:13.223441+00:00",
+      "win_rate": 65.57377049180327,
+      "buy_threshold": 0.5420664756751021,
+      "sell_threshold": 0.4579335243248979
+    },
+    {
+      "timestamp": "2026-02-10T08:38:36.169201+00:00",
+      "win_rate": 50.0,
+      "buy_threshold": 0.5420664756751021,
+      "sell_threshold": 0.4579335243248979
+    }
+  ]
+}

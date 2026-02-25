@@ -1,0 +1,26 @@
+TUNING COMPLETE
+Spot:    BASELINE $-367.06 -> TUNED $-224.29 (delta $+142.77)
+Futures: BASELINE $-2185.75 -> TUNED $-2592.39 (delta $-406.64)
+Total:   BASELINE $-2552.81 -> TUNED $-2816.68 (delta $-263.87)
+
+Spot per symbol:
+  ADA-USD           BASE:  15t 47% -2.00%  TUNED:  12t 50% -0.87%  delta: +1.13%
+  AVAX-USD          BASE:  14t 36% -2.59%  TUNED:  12t 42% -1.84%  delta: +0.75%
+  BTC-USD           BASE:  14t 36% -0.95%  TUNED:   8t 50% -0.56%  delta: +0.39%
+  DOGE-USD          BASE:  13t 31% -1.51%  TUNED:   8t 50% -0.20%  delta: +1.31%
+  ETH-USD           BASE:  16t 44% -1.51%  TUNED:  12t 50% -1.39%  delta: +0.13%
+  LINK-USD          BASE:  15t 40% -1.72%  TUNED:   8t 62% -1.62%  delta: +0.10%
+  LTC-USD           BASE:  15t 53% -1.15%  TUNED:   9t 22% -1.53%  delta: -0.39%
+  MATIC-USD         BASE:  15t 33% -1.56%  TUNED:   7t 71% +0.55%  delta: +2.12%
+  SOL-USD           BASE:  13t 38% -1.68%  TUNED:  11t 55% -1.52%  delta: +0.17%
+
+Futures per symbol:
+  PI_ADAUSD         BASE: 256t 71% -7.84%  TUNED: 104t 69% -3.66%  delta: +4.18%
+  PI_AVAXUSD        BASE: 268t 78% -0.74%  TUNED: 112t 69% -5.69%  delta: -4.95%
+  PI_DOGEUSD        BASE: 246t 74% -3.57%  TUNED:  97t 64% -5.96%  delta: -2.39%
+  PI_ETHUSD         BASE: 287t 77% -1.90%  TUNED: 121t 64% -6.59%  delta: -4.69%
+  PI_LINKUSD        BASE: 329t 75% -33.42%  TUNED: 149t 70% -33.53%  delta: -0.11%
+  PI_LTCUSD         BASE: 231t 71% -8.76%  TUNED:  81t 56% -9.40%  delta: -0.63%
+  PI_MATICUSD       BASE: 251t 70% -11.85%  TUNED:  81t 65% -5.12%  delta: +6.73%
+  PI_SOLUSD         BASE: 240t 69% -11.98%  TUNED:  99t 71% -32.60%  delta: -20.61%
+  PI_XBTUSD         BASE: 256t 73% -7.37%  TUNED:  83t 75% -1.15%  delta: +6.22%

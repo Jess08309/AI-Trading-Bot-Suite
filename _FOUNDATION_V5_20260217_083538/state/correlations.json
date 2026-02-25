@@ -1,0 +1,21 @@
+{
+  "correlation_matrix": {},
+  "price_counts": {
+    "BTC-USD": 60,
+    "ETH-USD": 60,
+    "SOL-USD": 60,
+    "ADA-USD": 60,
+    "AVAX-USD": 60,
+    "DOGE-USD": 60,
+    "MATIC-USD": 60,
+    "LTC-USD": 60,
+    "LINK-USD": 60,
+    "XRP-USD": 60,
+    "UNI-USD": 60,
+    "XLM-USD": 60,
+    "PI_XBTUSD": 60,
+    "PI_ETHUSD": 60,
+    "PI_XRPUSD": 60,
+    "PI_LTCUSD": 60
+  }
+}

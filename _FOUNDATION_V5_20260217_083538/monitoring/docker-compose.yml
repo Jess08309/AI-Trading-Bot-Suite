@@ -1,0 +1,36 @@
+services:
+  state-exporter:
+    image: python:3.11-slim
+    container_name: trading-state-exporter
+    working_dir: /workspace
+    command: sh -c "pip install --no-cache-dir prometheus_client && python monitoring/state_exporter.py"
+    volumes:
+      - ..:/workspace
+    environment:
+      - EXPORTER_PORT=9108
+      - EXPORTER_INTERVAL_SEC=15
+    ports:
+      - "9108:9108"
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: trading-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - state-exporter
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: trading-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
