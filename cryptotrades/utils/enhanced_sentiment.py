@@ -5,14 +5,15 @@ ALL sources are completely free — no API keys or accounts needed.
 Sources:
   1. Fear & Greed Index (alternative.me) — crypto-specific sentiment gauge
   2. CoinGecko Global Market — dominance, total market cap, volume
-  3. Bitcoin funding rates (CoinGlass free endpoint)
-  4. Bitcoin liquidations signal (CoinGlass free)
+  3. Bitcoin funding rates (Kraken public)
+  4. Liquidation Proxy (Kraken futures basis/funding squeeze detection)
   5. Open Interest change (Kraken public)
   6. DXY / Dollar strength proxy (free exchange rate API)
-  7. Gold price proxy via PAXG (already traded by the bot)
+  7. Whale Transaction Tracker (blockchain.info — large BTC flow analysis)
   8. On-chain: mempool congestion proxy (blockchain.info free)
-  9. Google Trends proxy (via pytrends — no key needed)
+  9. Long/Short Ratio (Kraken perpetual spread)
   10. Stablecoin market cap ratio (CoinGecko — risk-on/risk-off signal)
+  11. Top Coin Momentum (CoinGecko top coins 24h changes)
 
 All data cached to avoid hitting rate limits.
 """
@@ -523,6 +524,176 @@ def fetch_long_short_ratio() -> Dict:
 
 
 # -----------------------------------------------------------
+# 10. Whale Transaction Tracker (blockchain.info — free)
+# -----------------------------------------------------------
+def fetch_whale_transactions() -> Dict:
+    """
+    Detect large BTC transactions via blockchain.info public API.
+    Large exchange inflows = bearish (selling pressure).
+    Large exchange outflows = bullish (accumulation).
+    High whale activity in either direction = increased volatility signal.
+    FREE — no key needed.
+    """
+    cached = _get_cached("whale_txns", ttl_seconds=600)  # 10-min cache
+    if cached:
+        return cached
+
+    try:
+        # Recent unconfirmed large transactions (> 10 BTC)
+        # blockchain.info /unconfirmed-transactions has public JSON feed
+        resp = requests.get(
+            "https://blockchain.info/unconfirmed-transactions?format=json",
+            timeout=15
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        txs = data.get("txs", [])
+
+        WHALE_THRESHOLD_BTC = 10.0  # 10 BTC minimum to count as whale
+        SATOSHI = 100_000_000
+
+        whale_count = 0
+        total_whale_btc = 0.0
+        large_outflows = 0   # multi-input consolidation = exchange withdrawal
+        large_inflows = 0    # single-input, multi-output = exchange deposit
+
+        for tx in txs[:200]:  # cap at 200 to limit processing time
+            outputs = tx.get("out", [])
+            inputs = tx.get("inputs", [])
+            total_out_btc = sum(o.get("value", 0) for o in outputs) / SATOSHI
+
+            if total_out_btc >= WHALE_THRESHOLD_BTC:
+                whale_count += 1
+                total_whale_btc += total_out_btc
+
+                # Heuristic: many inputs → 1-2 outputs = consolidation/withdrawal (bullish)
+                # 1 input → many outputs = distribution (bearish)
+                if len(inputs) > 3 and len(outputs) <= 2:
+                    large_outflows += 1  # accumulation pattern
+                elif len(inputs) <= 2 and len(outputs) > 3:
+                    large_inflows += 1   # distribution pattern
+
+        # Net flow direction: outflows (bullish) vs inflows (bearish)
+        net_flow = large_outflows - large_inflows
+        total_flow = max(large_outflows + large_inflows, 1)
+
+        # Normalize to -1..+1: positive = net accumulation (bullish)
+        flow_signal = max(-1.0, min(1.0, net_flow / max(total_flow, 3) * 2.0))
+
+        # Volume intensity: how active are whales right now?
+        # Baseline ~5 whale txns per 10-min window is "normal"
+        intensity = min(1.0, whale_count / 15.0)  # 0-1 scale
+
+        result = {
+            "whale_count": whale_count,
+            "total_whale_btc": round(total_whale_btc, 2),
+            "large_outflows": large_outflows,
+            "large_inflows": large_inflows,
+            "flow_signal": flow_signal,  # +bullish / -bearish
+            "intensity": intensity,
+            "signal": flow_signal,  # used by composite
+            "source": "blockchain.info",
+        }
+
+        _set_cached("whale_txns", result, ttl_seconds=600)
+        _save_disk_cache("whale_txns", result)
+        return result
+
+    except Exception:
+        disk = _get_disk_cache("whale_txns")
+        return disk or {"whale_count": 0, "signal": 0, "source": "fallback"}
+
+
+# -----------------------------------------------------------
+# 11. Liquidation Proxy (Kraken Futures — free)
+# -----------------------------------------------------------
+def fetch_liquidation_data() -> Dict:
+    """
+    Estimate liquidation pressure from Kraken futures data.
+    Uses mark price vs index price deviation + funding rate direction
+    to estimate which side is getting squeezed.
+
+    Large positive basis + negative funding = shorts being squeezed (bullish)
+    Large negative basis + positive funding = longs being squeezed (bearish)
+    FREE — derived from existing Kraken public endpoints.
+    """
+    cached = _get_cached("liquidations", ttl_seconds=300)
+    if cached:
+        return cached
+
+    try:
+        resp = requests.get(
+            "https://futures.kraken.com/derivatives/api/v3/tickers",
+            timeout=10
+        )
+        resp.raise_for_status()
+        tickers = resp.json().get("tickers", [])
+
+        targets = {
+            "PI_XBTUSD": "BTC", "PI_ETHUSD": "ETH", "PI_SOLUSD": "SOL",
+            "PI_ADAUSD": "ADA", "PI_DOGEUSD": "DOGE", "PI_LINKUSD": "LINK",
+        }
+
+        squeeze_signals = []
+        details = {}
+
+        for ticker in tickers:
+            symbol = ticker.get("symbol", "").upper()
+            if symbol not in targets:
+                continue
+
+            mark = ticker.get("markPrice", 0)
+            index_price = ticker.get("indexPrice", 0)
+            funding = ticker.get("fundingRate", 0)
+            vol_24h = ticker.get("vol24h", 0)
+            oi = ticker.get("openInterest", 0)
+
+            if not mark or not index_price or index_price == 0:
+                continue
+
+            # Basis: how far mark deviates from index
+            basis_pct = (mark - index_price) / index_price * 100
+
+            # Squeeze detection:
+            # Positive basis + negative funding = shorts paying longs = short squeeze potential
+            # Negative basis + positive funding = longs paying shorts = long squeeze potential
+            if basis_pct > 0.05 and funding < 0:
+                squeeze = basis_pct * 10  # bullish
+            elif basis_pct < -0.05 and funding > 0:
+                squeeze = basis_pct * 10  # bearish (negative value)
+            else:
+                squeeze = basis_pct * 5   # mild directional signal
+
+            squeeze_signals.append(max(-1.0, min(1.0, squeeze)))
+
+            details[targets[symbol]] = {
+                "basis_pct": round(basis_pct, 4),
+                "funding_rate": float(funding) if funding else 0.0,
+                "vol_24h": float(vol_24h) if vol_24h else 0.0,
+                "open_interest": float(oi) if oi else 0.0,
+                "squeeze_signal": round(max(-1.0, min(1.0, squeeze)), 3),
+            }
+
+        avg_squeeze = sum(squeeze_signals) / max(len(squeeze_signals), 1) if squeeze_signals else 0
+
+        result = {
+            "details": details,
+            "avg_squeeze": round(avg_squeeze, 4),
+            "signal": max(-1.0, min(1.0, avg_squeeze)),
+            "coins_tracked": len(details),
+            "source": "kraken_futures",
+        }
+
+        _set_cached("liquidations", result, ttl_seconds=300)
+        _save_disk_cache("liquidations", result)
+        return result
+
+    except Exception:
+        disk = _get_disk_cache("liquidations")
+        return disk or {"avg_squeeze": 0, "signal": 0, "source": "fallback"}
+
+
+# -----------------------------------------------------------
 # UNIFIED: Aggregate all enhanced signals
 # -----------------------------------------------------------
 def fetch_all_enhanced_signals() -> Dict:
@@ -570,16 +741,27 @@ def fetch_all_enhanced_signals() -> Dict:
     ls = fetch_long_short_ratio()
     signals["long_short"] = ls
 
+    # Whale transactions
+    wt = fetch_whale_transactions()
+    signals["whale_flow"] = wt
+
+    # Liquidation proxy
+    lq = fetch_liquidation_data()
+    signals["liquidations"] = lq
+
     # Composite sentiment: weighted blend of all signals
+    # Rebalanced weights to include whale flow + liquidation data
     weights = {
-        "fear_greed": 0.25,       # Strongest single indicator
-        "coin_momentum": 0.20,    # Broad market direction
-        "funding_rates": 0.15,    # Crowding indicator
-        "long_short": 0.10,       # Positioning
-        "dollar_strength": 0.10,  # Macro
-        "stablecoin_ratio": 0.10, # Dry powder
-        "mempool": 0.05,          # On-chain activity
-        "global_market": 0.05,    # Market cap trend
+        "fear_greed": 0.20,       # Strongest single indicator
+        "coin_momentum": 0.15,    # Broad market direction
+        "funding_rates": 0.12,    # Crowding indicator
+        "long_short": 0.08,       # Positioning
+        "dollar_strength": 0.08,  # Macro
+        "stablecoin_ratio": 0.08, # Dry powder
+        "whale_flow": 0.12,       # Whale accumulation/distribution
+        "liquidations": 0.10,     # Squeeze / liquidation pressure
+        "mempool": 0.04,          # On-chain activity
+        "global_market": 0.03,    # Market cap trend
     }
 
     composite = 0.0

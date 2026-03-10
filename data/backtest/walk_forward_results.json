@@ -1,0 +1,804 @@
+{
+  "run_timestamp": "2026-03-05T01:14:06.340131",
+  "config": {
+    "num_sims": 10000,
+    "train_days": 60,
+    "test_days": 20,
+    "step_days": 20,
+    "paper_balance_spot": 2500.0,
+    "paper_balance_futures": 2500.0,
+    "spot_fee_rate": 0.0007,
+    "futures_fee_rate": 0.0006
+  },
+  "monte_carlo": {
+    "num_simulations": 10000,
+    "num_trades_per_sim": 420,
+    "probability_of_profit": 0.1859,
+    "probability_of_ruin_50pct": 0.0,
+    "expected_value_per_trade_usd": -0.078,
+    "cvar_5pct_usd": -108.94,
+    "mean_terminal_pnl_usd": -32.74,
+    "median_terminal_pnl_usd": -32.63,
+    "std_terminal_pnl_usd": 36.68,
+    "mean_max_drawdown_usd": 60.53,
+    "mean_sharpe_ratio": -0.378,
+    "mean_profit_factor": 0.9,
+    "avg_longest_win_streak": 7.8,
+    "avg_longest_loss_streak": 8.2,
+    "confidence_intervals": {
+      "1%": {
+        "terminal_pnl": -119.35,
+        "max_drawdown": 20.57,
+        "win_rate": 0.4333,
+        "sharpe_ratio": -4.19,
+        "profit_factor": 0.66
+      },
+      "5%": {
+        "terminal_pnl": -93.45,
+        "max_drawdown": 26.68,
+        "win_rate": 0.45,
+        "sharpe_ratio": -3.046,
+        "profit_factor": 0.723
+      },
+      "10%": {
+        "terminal_pnl": -80.25,
+        "max_drawdown": 31.29,
+        "win_rate": 0.4595,
+        "sharpe_ratio": -2.459,
+        "profit_factor": 0.757
+      },
+      "25%": {
+        "terminal_pnl": -57.04,
+        "max_drawdown": 41.56,
+        "win_rate": 0.4738,
+        "sharpe_ratio": -1.455,
+        "profit_factor": 0.82
+      },
+      "50%": {
+        "terminal_pnl": -32.63,
+        "max_drawdown": 56.71,
+        "win_rate": 0.4905,
+        "sharpe_ratio": -0.356,
+        "profit_factor": 0.894
+      },
+      "75%": {
+        "terminal_pnl": -8.01,
+        "max_drawdown": 75.91,
+        "win_rate": 0.5071,
+        "sharpe_ratio": 0.712,
+        "profit_factor": 0.973
+      },
+      "90%": {
+        "terminal_pnl": 13.97,
+        "max_drawdown": 95.09,
+        "win_rate": 0.5214,
+        "sharpe_ratio": 1.662,
+        "profit_factor": 1.049
+      },
+      "95%": {
+        "terminal_pnl": 26.87,
+        "max_drawdown": 106.74,
+        "win_rate": 0.531,
+        "sharpe_ratio": 2.27,
+        "profit_factor": 1.097
+      },
+      "99%": {
+        "terminal_pnl": 51.05,
+        "max_drawdown": 127.73,
+        "win_rate": 0.5452,
+        "sharpe_ratio": 3.319,
+        "profit_factor": 1.192
+      }
+    }
+  },
+  "symbol_breakdown": {
+    "AAVE-USD": {
+      "n_trades": 16,
+      "actual_total_pnl": 9.33,
+      "mean_sim_pnl": 9.31,
+      "p5_sim_pnl": -3.92,
+      "p50_sim_pnl": 9.2,
+      "p95_sim_pnl": 22.27,
+      "prob_profit": 0.88
+    },
+    "ADA-USD": {
+      "n_trades": 9,
+      "actual_total_pnl": -8.56,
+      "mean_sim_pnl": -8.82,
+      "p5_sim_pnl": -15.63,
+      "p50_sim_pnl": -8.91,
+      "p95_sim_pnl": -1.28,
+      "prob_profit": 0.031
+    },
+    "ATOM-USD": {
+      "n_trades": 21,
+      "actual_total_pnl": -4.51,
+      "mean_sim_pnl": -4.92,
+      "p5_sim_pnl": -17.68,
+      "p50_sim_pnl": -4.82,
+      "p95_sim_pnl": 8.24,
+      "prob_profit": 0.268
+    },
+    "AVAX-USD": {
+      "n_trades": 16,
+      "actual_total_pnl": 0.35,
+      "mean_sim_pnl": 0.52,
+      "p5_sim_pnl": -13.32,
+      "p50_sim_pnl": 0.77,
+      "p95_sim_pnl": 14.05,
+      "prob_profit": 0.544
+    },
+    "BCH-USD": {
+      "n_trades": 22,
+      "actual_total_pnl": 8.95,
+      "mean_sim_pnl": 8.81,
+      "p5_sim_pnl": -2.74,
+      "p50_sim_pnl": 8.82,
+      "p95_sim_pnl": 19.97,
+      "prob_profit": 0.896
+    },
+    "BTC-USD": {
+      "n_trades": 7,
+      "actual_total_pnl": -2.51,
+      "mean_sim_pnl": -2.46,
+      "p5_sim_pnl": -6.21,
+      "p50_sim_pnl": -2.24,
+      "p95_sim_pnl": 0.37,
+      "prob_profit": 0.105
+    },
+    "DOGE-USD": {
+      "n_trades": 12,
+      "actual_total_pnl": 7.39,
+      "mean_sim_pnl": 7.55,
+      "p5_sim_pnl": -4.0,
+      "p50_sim_pnl": 7.95,
+      "p95_sim_pnl": 17.88,
+      "prob_profit": 0.863
+    },
+    "DOT-USD": {
+      "n_trades": 28,
+      "actual_total_pnl": 16.16,
+      "mean_sim_pnl": 16.3,
+      "p5_sim_pnl": -4.97,
+      "p50_sim_pnl": 16.52,
+      "p95_sim_pnl": 37.33,
+      "prob_profit": 0.895
+    },
+    "ETH-USD": {
+      "n_trades": 7,
+      "actual_total_pnl": -4.28,
+      "mean_sim_pnl": -4.14,
+      "p5_sim_pnl": -10.96,
+      "p50_sim_pnl": -4.3,
+      "p95_sim_pnl": 3.2,
+      "prob_profit": 0.184
+    },
+    "LINK-USD": {
+      "n_trades": 7,
+      "actual_total_pnl": 2.15,
+      "mean_sim_pnl": 2.22,
+      "p5_sim_pnl": -8.2,
+      "p50_sim_pnl": 2.15,
+      "p95_sim_pnl": 12.24,
+      "prob_profit": 0.635
+    },
+    "LTC-USD": {
+      "n_trades": 11,
+      "actual_total_pnl": 2.85,
+      "mean_sim_pnl": 2.92,
+      "p5_sim_pnl": -3.26,
+      "p50_sim_pnl": 2.81,
+      "p95_sim_pnl": 9.31,
+      "prob_profit": 0.78
+    },
+    "MATIC-USD": {
+      "n_trades": 29,
+      "actual_total_pnl": -20.48,
+      "mean_sim_pnl": -20.35,
+      "p5_sim_pnl": -42.87,
+      "p50_sim_pnl": -20.27,
+      "p95_sim_pnl": 2.3,
+      "prob_profit": 0.075
+    },
+    "NEAR-USD": {
+      "n_trades": 24,
+      "actual_total_pnl": -12.43,
+      "mean_sim_pnl": -12.34,
+      "p5_sim_pnl": -29.4,
+      "p50_sim_pnl": -12.36,
+      "p95_sim_pnl": 5.55,
+      "prob_profit": 0.115
+    },
+    "PAXG-USD": {
+      "n_trades": 26,
+      "actual_total_pnl": -0.75,
+      "mean_sim_pnl": -0.73,
+      "p5_sim_pnl": -9.74,
+      "p50_sim_pnl": -0.72,
+      "p95_sim_pnl": 8.66,
+      "prob_profit": 0.449
+    },
+    "PI_ADAUSD": {
+      "n_trades": 15,
+      "actual_total_pnl": -5.73,
+      "mean_sim_pnl": -6.21,
+      "p5_sim_pnl": -17.32,
+      "p50_sim_pnl": -6.17,
+      "p95_sim_pnl": 4.37,
+      "prob_profit": 0.18
+    },
+    "PI_ATOMUSD": {
+      "n_trades": 6,
+      "actual_total_pnl": 0.53,
+      "mean_sim_pnl": 0.55,
+      "p5_sim_pnl": -1.0,
+      "p50_sim_pnl": 0.53,
+      "p95_sim_pnl": 2.26,
+      "prob_profit": 0.694
+    },
+    "PI_AVAXUSD": {
+      "n_trades": 6,
+      "actual_total_pnl": 4.82,
+      "mean_sim_pnl": 4.85,
+      "p5_sim_pnl": 0.54,
+      "p50_sim_pnl": 4.66,
+      "p95_sim_pnl": 9.78,
+      "prob_profit": 0.972
+    },
+    "PI_DOGEUSD": {
+      "n_trades": 9,
+      "actual_total_pnl": 2.28,
+      "mean_sim_pnl": 2.28,
+      "p5_sim_pnl": -4.61,
+      "p50_sim_pnl": 2.1,
+      "p95_sim_pnl": 9.53,
+      "prob_profit": 0.698
+    },
+    "PI_DOTUSD": {
+      "n_trades": 12,
+      "actual_total_pnl": 3.27,
+      "mean_sim_pnl": 3.45,
+      "p5_sim_pnl": -3.9,
+      "p50_sim_pnl": 3.29,
+      "p95_sim_pnl": 11.52,
+      "prob_profit": 0.747
+    },
+    "PI_ETHUSD": {
+      "n_trades": 22,
+      "actual_total_pnl": -7.38,
+      "mean_sim_pnl": -7.52,
+      "p5_sim_pnl": -16.65,
+      "p50_sim_pnl": -7.38,
+      "p95_sim_pnl": 0.71,
+      "prob_profit": 0.064
+    },
+    "PI_LTCUSD": {
+      "n_trades": 12,
+      "actual_total_pnl": 3.42,
+      "mean_sim_pnl": 3.4,
+      "p5_sim_pnl": -0.32,
+      "p50_sim_pnl": 3.3,
+      "p95_sim_pnl": 7.2,
+      "prob_profit": 0.933
+    },
+    "PI_SOLUSD": {
+      "n_trades": 11,
+      "actual_total_pnl": 4.94,
+      "mean_sim_pnl": 4.94,
+      "p5_sim_pnl": -0.86,
+      "p50_sim_pnl": 4.73,
+      "p95_sim_pnl": 11.07,
+      "prob_profit": 0.92
+    },
+    "PI_XBTUSD": {
+      "n_trades": 10,
+      "actual_total_pnl": -4.01,
+      "mean_sim_pnl": -3.91,
+      "p5_sim_pnl": -6.63,
+      "p50_sim_pnl": -3.94,
+      "p95_sim_pnl": -1.21,
+      "prob_profit": 0.01
+    },
+    "PI_XRPUSD": {
+      "n_trades": 21,
+      "actual_total_pnl": -0.39,
+      "mean_sim_pnl": -0.21,
+      "p5_sim_pnl": -12.12,
+      "p50_sim_pnl": -0.19,
+      "p95_sim_pnl": 10.85,
+      "prob_profit": 0.491
+    },
+    "SOL-USD": {
+      "n_trades": 12,
+      "actual_total_pnl": -3.5,
+      "mean_sim_pnl": -3.7,
+      "p5_sim_pnl": -14.51,
+      "p50_sim_pnl": -3.6,
+      "p95_sim_pnl": 7.23,
+      "prob_profit": 0.293
+    },
+    "UNI-USD": {
+      "n_trades": 19,
+      "actual_total_pnl": -9.09,
+      "mean_sim_pnl": -9.0,
+      "p5_sim_pnl": -23.66,
+      "p50_sim_pnl": -9.25,
+      "p95_sim_pnl": 6.55,
+      "prob_profit": 0.175
+    },
+    "XLM-USD": {
+      "n_trades": 17,
+      "actual_total_pnl": -7.1,
+      "mean_sim_pnl": -7.17,
+      "p5_sim_pnl": -22.02,
+      "p50_sim_pnl": -7.29,
+      "p95_sim_pnl": 7.89,
+      "prob_profit": 0.219
+    },
+    "XRP-USD": {
+      "n_trades": 6,
+      "actual_total_pnl": -5.98,
+      "mean_sim_pnl": -5.97,
+      "p5_sim_pnl": -10.04,
+      "p50_sim_pnl": -5.84,
+      "p95_sim_pnl": -2.22,
+      "prob_profit": 0.001
+    }
+  },
+  "exit_reason_stats": {
+    "MAX_HOLD_FLAT": {
+      "count": 174,
+      "total_pnl": -8.54,
+      "mean_pnl": -0.05,
+      "win_rate": 0.4828
+    },
+    "MAX_HOLD_FORCED": {
+      "count": 39,
+      "total_pnl": -9.69,
+      "mean_pnl": -0.25,
+      "win_rate": 0.4359
+    },
+    "STALE_PROFIT_DECAY": {
+      "count": 12,
+      "total_pnl": 9.11,
+      "mean_pnl": 0.76,
+      "win_rate": 1.0
+    },
+    "STARTUP_TRIM_STACKED": {
+      "count": 6,
+      "total_pnl": 1.44,
+      "mean_pnl": 0.24,
+      "win_rate": 0.6667
+    },
+    "STOP_LOSS": {
+      "count": 100,
+      "total_pnl": -247.83,
+      "mean_pnl": -2.48,
+      "win_rate": 0.0
+    },
+    "TAKE_PROFIT": {
+      "count": 88,
+      "total_pnl": 221.93,
+      "mean_pnl": 2.52,
+      "win_rate": 1.0
+    },
+    "TRAILING_STOP": {
+      "count": 1,
+      "total_pnl": 0.94,
+      "mean_pnl": 0.94,
+      "win_rate": 1.0
+    }
+  },
+  "walk_forward": {
+    "aggregate": {
+      "total_windows": 459,
+      "unique_symbols_tested": 15,
+      "train_window_days": 60,
+      "test_window_days": 20,
+      "step_days": 20,
+      "mean_is_accuracy": 0.9861,
+      "mean_oos_accuracy": 0.5242,
+      "std_oos_accuracy": 0.1617,
+      "median_oos_accuracy": 0.55,
+      "mean_overfit_delta": 0.4619,
+      "mean_false_positive_rate": 0.3731,
+      "pct_windows_above_55": 0.4205,
+      "pct_windows_above_50": 0.5381
+    },
+    "per_symbol": {
+      "ADA-USD": {
+        "num_windows": 31,
+        "mean_is_accuracy": 0.9898,
+        "mean_oos_accuracy": 0.5323,
+        "std_oos_accuracy": 0.1594,
+        "min_oos_accuracy": 0.1,
+        "max_oos_accuracy": 0.8,
+        "mean_overfit_delta": 0.4575,
+        "mean_fpr": 0.3504
+      },
+      "ATOM-USD": {
+        "num_windows": 31,
+        "mean_is_accuracy": 0.986,
+        "mean_oos_accuracy": 0.5355,
+        "std_oos_accuracy": 0.1449,
+        "min_oos_accuracy": 0.2,
+        "max_oos_accuracy": 0.9,
+        "mean_overfit_delta": 0.4505,
+        "mean_fpr": 0.3447
+      },
+      "AVAX-USD": {
+        "num_windows": 31,
+        "mean_is_accuracy": 0.986,
+        "mean_oos_accuracy": 0.529,
+        "std_oos_accuracy": 0.1708,
+        "min_oos_accuracy": 0.2,
+        "max_oos_accuracy": 0.8,
+        "mean_overfit_delta": 0.457,
+        "mean_fpr": 0.4076
+      },
+      "BTC-USD": {
+        "num_windows": 31,
+        "mean_is_accuracy": 0.9919,
+        "mean_oos_accuracy": 0.4919,
+        "std_oos_accuracy": 0.1676,
+        "min_oos_accuracy": 0.05,
+        "max_oos_accuracy": 0.8,
+        "mean_overfit_delta": 0.5,
+        "mean_fpr": 0.4417
+      },
+      "DOGE-USD": {
+        "num_windows": 31,
+        "mean_is_accuracy": 0.9903,
+        "mean_oos_accuracy": 0.521,
+        "std_oos_accuracy": 0.1565,
+        "min_oos_accuracy": 0.2,
+        "max_oos_accuracy": 0.85,
+        "mean_overfit_delta": 0.4693,
+        "mean_fpr": 0.3335
+      },
+      "DOT-USD": {
+        "num_windows": 31,
+        "mean_is_accuracy": 0.9844,
+        "mean_oos_accuracy": 0.5452,
+        "std_oos_accuracy": 0.1542,
+        "min_oos_accuracy": 0.15,
+        "max_oos_accuracy": 0.8,
+        "mean_overfit_delta": 0.4392,
+        "mean_fpr": 0.3511
+      },
+      "ETH-USD": {
+        "num_windows": 31,
+        "mean_is_accuracy": 0.9823,
+        "mean_oos_accuracy": 0.5113,
+        "std_oos_accuracy": 0.1549,
+        "min_oos_accuracy": 0.25,
+        "max_oos_accuracy": 0.85,
+        "mean_overfit_delta": 0.471,
+        "mean_fpr": 0.4736
+      },
+      "LINK-USD": {
+        "num_windows": 31,
+        "mean_is_accuracy": 0.9801,
+        "mean_oos_accuracy": 0.5339,
+        "std_oos_accuracy": 0.1633,
+        "min_oos_accuracy": 0.25,
+        "max_oos_accuracy": 0.9,
+        "mean_overfit_delta": 0.4462,
+        "mean_fpr": 0.3346
+      },
+      "LTC-USD": {
+        "num_windows": 31,
+        "mean_is_accuracy": 0.9833,
+        "mean_oos_accuracy": 0.5226,
+        "std_oos_accuracy": 0.158,
+        "min_oos_accuracy": 0.15,
+        "max_oos_accuracy": 0.8,
+        "mean_overfit_delta": 0.4607,
+        "mean_fpr": 0.399
+      },
+      "SHIB-USD": {
+        "num_windows": 31,
+        "mean_is_accuracy": 0.9876,
+        "mean_oos_accuracy": 0.55,
+        "std_oos_accuracy": 0.154,
+        "min_oos_accuracy": 0.1,
+        "max_oos_accuracy": 0.85,
+        "mean_overfit_delta": 0.4376,
+        "mean_fpr": 0.3062
+      },
+      "SOL-USD": {
+        "num_windows": 31,
+        "mean_is_accuracy": 0.9898,
+        "mean_oos_accuracy": 0.4742,
+        "std_oos_accuracy": 0.1361,
+        "min_oos_accuracy": 0.2,
+        "max_oos_accuracy": 0.65,
+        "mean_overfit_delta": 0.5156,
+        "mean_fpr": 0.4354
+      },
+      "XLM-USD": {
+        "num_windows": 31,
+        "mean_is_accuracy": 0.9828,
+        "mean_oos_accuracy": 0.5258,
+        "std_oos_accuracy": 0.1804,
+        "min_oos_accuracy": 0.05,
+        "max_oos_accuracy": 0.85,
+        "mean_overfit_delta": 0.457,
+        "mean_fpr": 0.2807
+      },
+      "UNI-USD": {
+        "num_windows": 31,
+        "mean_is_accuracy": 0.9876,
+        "mean_oos_accuracy": 0.5306,
+        "std_oos_accuracy": 0.1848,
+        "min_oos_accuracy": 0.15,
+        "max_oos_accuracy": 1.0,
+        "mean_overfit_delta": 0.457,
+        "mean_fpr": 0.3193
+      },
+      "XRP-USD": {
+        "num_windows": 31,
+        "mean_is_accuracy": 0.9898,
+        "mean_oos_accuracy": 0.521,
+        "std_oos_accuracy": 0.1759,
+        "min_oos_accuracy": 0.05,
+        "max_oos_accuracy": 0.85,
+        "mean_overfit_delta": 0.4688,
+        "mean_fpr": 0.4487
+      },
+      "MATIC-USD": {
+        "num_windows": 25,
+        "mean_is_accuracy": 0.9787,
+        "mean_oos_accuracy": 0.542,
+        "std_oos_accuracy": 0.1339,
+        "min_oos_accuracy": 0.25,
+        "max_oos_accuracy": 0.75,
+        "mean_overfit_delta": 0.4367,
+        "mean_fpr": 0.3691
+      }
+    },
+    "sample_windows": [
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2024-03-12",
+        "window_end": "2024-05-31",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 0.9833,
+        "oos_accuracy": 0.65,
+        "overfit_delta": 0.3333,
+        "false_positive_rate": 0.0,
+        "ev_proxy": 0.3
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2024-04-01",
+        "window_end": "2024-06-20",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 0.95,
+        "oos_accuracy": 0.4,
+        "overfit_delta": 0.55,
+        "false_positive_rate": 0.7059,
+        "ev_proxy": -0.2
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2024-04-21",
+        "window_end": "2024-07-10",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 1.0,
+        "oos_accuracy": 0.3,
+        "overfit_delta": 0.7,
+        "false_positive_rate": 0.0,
+        "ev_proxy": -0.4
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2024-05-11",
+        "window_end": "2024-07-30",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 1.0,
+        "oos_accuracy": 0.6,
+        "overfit_delta": 0.4,
+        "false_positive_rate": 0.2143,
+        "ev_proxy": 0.2
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2024-05-31",
+        "window_end": "2024-08-19",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 1.0,
+        "oos_accuracy": 0.6,
+        "overfit_delta": 0.4,
+        "false_positive_rate": 0.4545,
+        "ev_proxy": 0.2
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2024-06-20",
+        "window_end": "2024-09-08",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 1.0,
+        "oos_accuracy": 0.6,
+        "overfit_delta": 0.4,
+        "false_positive_rate": 0.3846,
+        "ev_proxy": 0.2
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2024-07-10",
+        "window_end": "2024-09-28",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 0.9833,
+        "oos_accuracy": 0.4,
+        "overfit_delta": 0.5833,
+        "false_positive_rate": 0.0,
+        "ev_proxy": -0.2
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2024-07-30",
+        "window_end": "2024-10-18",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 1.0,
+        "oos_accuracy": 0.6,
+        "overfit_delta": 0.4,
+        "false_positive_rate": 0.2222,
+        "ev_proxy": 0.2
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2024-08-19",
+        "window_end": "2024-11-07",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 0.9833,
+        "oos_accuracy": 0.65,
+        "overfit_delta": 0.3333,
+        "false_positive_rate": 0.6667,
+        "ev_proxy": 0.3
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2024-09-08",
+        "window_end": "2024-11-27",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 0.95,
+        "oos_accuracy": 0.1,
+        "overfit_delta": 0.85,
+        "false_positive_rate": 0.0,
+        "ev_proxy": -0.8
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2024-09-28",
+        "window_end": "2024-12-17",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 1.0,
+        "oos_accuracy": 0.55,
+        "overfit_delta": 0.45,
+        "false_positive_rate": 0.7273,
+        "ev_proxy": 0.1
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2024-10-18",
+        "window_end": "2025-01-06",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 0.9833,
+        "oos_accuracy": 0.35,
+        "overfit_delta": 0.6333,
+        "false_positive_rate": 0.9167,
+        "ev_proxy": -0.3
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2024-11-07",
+        "window_end": "2025-01-26",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 1.0,
+        "oos_accuracy": 0.7,
+        "overfit_delta": 0.3,
+        "false_positive_rate": 0.3333,
+        "ev_proxy": 0.4
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2024-11-27",
+        "window_end": "2025-02-15",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 1.0,
+        "oos_accuracy": 0.6,
+        "overfit_delta": 0.4,
+        "false_positive_rate": 0.5714,
+        "ev_proxy": 0.2
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2024-12-17",
+        "window_end": "2025-03-07",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 1.0,
+        "oos_accuracy": 0.8,
+        "overfit_delta": 0.2,
+        "false_positive_rate": 0.0769,
+        "ev_proxy": 0.6
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2025-01-06",
+        "window_end": "2025-03-27",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 1.0,
+        "oos_accuracy": 0.7,
+        "overfit_delta": 0.3,
+        "false_positive_rate": 0.0,
+        "ev_proxy": 0.4
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2025-01-26",
+        "window_end": "2025-04-16",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 0.9833,
+        "oos_accuracy": 0.5,
+        "overfit_delta": 0.4833,
+        "false_positive_rate": 0.5333,
+        "ev_proxy": 0.0
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2025-02-15",
+        "window_end": "2025-05-06",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 1.0,
+        "oos_accuracy": 0.45,
+        "overfit_delta": 0.55,
+        "false_positive_rate": 0.0,
+        "ev_proxy": -0.1
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2025-03-07",
+        "window_end": "2025-05-26",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 1.0,
+        "oos_accuracy": 0.6,
+        "overfit_delta": 0.4,
+        "false_positive_rate": 0.2727,
+        "ev_proxy": 0.2
+      },
+      {
+        "symbol": "ADA-USD",
+        "window_start": "2025-03-27",
+        "window_end": "2025-06-15",
+        "train_samples": 60,
+        "test_samples": 20,
+        "is_accuracy": 0.9833,
+        "oos_accuracy": 0.8,
+        "overfit_delta": 0.1833,
+        "false_positive_rate": 0.1176,
+        "ev_proxy": 0.6
+      }
+    ]
+  },
+  "elapsed_seconds": 21.5
+}

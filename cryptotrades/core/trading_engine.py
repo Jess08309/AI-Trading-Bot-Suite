@@ -1,14 +1,19 @@
 from __future__ import annotations
-import sys
 import os
+# Prevent OpenMP deadlock between PyTorch CUDA and sklearn/numpy
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("MKL_NUM_THREADS", "4")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+import sys
 import logging
 import time
+import math
 import signal
 import json
 import csv
 import smtplib
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
@@ -94,14 +99,16 @@ class TradingConfig:
     MAX_POSITION_PCT: float = 0.08         # 8% max per position
     MIN_POSITION_PCT: float = 0.02         # 2% min
 
-    # Stop Loss / Take Profit  (1.25:1 R:R — needs >44% WR)
-    STOP_LOSS_PCT: float = -2.0            # -2% stop (cut losers fast)
-    TAKE_PROFIT_PCT: float = 2.5           # 2.5% target (more achievable)
-    TRAILING_STOP_PCT: float = 1.5         # 1.5% trailing (lock profits earlier)
+    # Stop Loss / Take Profit  (2.3:1 R:R — asymmetric edge)
+    STOP_LOSS_PCT: float = -1.5            # -1.5% stop (tighter cuts)
+    TAKE_PROFIT_PCT: float = 3.5           # 3.5% target (wider, asymmetric)
+    TRAILING_STOP_PCT: float = 0.8         # 0.8% trailing (fires more often)
+    TRAILING_ACTIVATE_PCT: float = 1.2     # Activate trailing after 1.2% profit
 
     # Futures specific
     FUTURES_LEVERAGE: int = 2
-    FUTURES_STOP_LOSS: float = -3.0        # -3% for leveraged positions
+    FUTURES_STOP_LOSS: float = -2.0        # -2% for leveraged positions
+    FUTURES_TAKE_PROFIT: float = 4.0       # 4% target for futures
 
     # Stale profit-decay exit
     STALE_EXIT_PROFIT_ARM_PCT: float = 1.5
@@ -110,8 +117,10 @@ class TradingConfig:
     STALE_EXIT_STALE_MIN_FUTURES: int = 25
 
     # Max hold time — close flat positions that go nowhere
-    MAX_HOLD_HOURS_SPOT: int = 4           # Close spot after 4h if flat
-    MAX_HOLD_HOURS_FUTURES: int = 3        # Close futures after 3h if flat
+    MAX_HOLD_HOURS_SPOT: float = 2.5       # Close spot after 2.5h if flat (was 4)
+    MAX_HOLD_HOURS_FUTURES: float = 1.5    # Close futures after 1.5h if flat (was 3)
+    MAX_HOLD_FORCED_HOURS_SPOT: float = 5.0   # Force close spot after 5h (was 8)
+    MAX_HOLD_FORCED_HOURS_FUTURES: float = 3.5 # Force close futures after 3.5h (was 6)
     MAX_HOLD_FLAT_BAND_PCT: float = 0.5    # |P/L| < 0.5% counts as "flat"
 
     # Circuit Breaker
@@ -148,19 +157,31 @@ class TradingConfig:
     MIN_TREND_SLOPE: float = 0.0005        # Minimum slope to consider trending
 
     # Correlation
-    MAX_CORRELATION: float = 0.75          # Tight correlation limit
+    MAX_CORRELATION: float = 0.60          # Strict diversification (was 0.75)
 
     # Execution quality
     SLIPPAGE_BPS_SPOT: float = 5.0         # 0.05%
     SLIPPAGE_BPS_FUTURES: float = 8.0      # 0.08%
 
-    # Liquidity gate
-    USE_LIQUIDITY_GATE: bool = False
+    # Liquidity gate — enabled: skip trades with insufficient orderbook depth
+    USE_LIQUIDITY_GATE: bool = True
     ORDERBOOK_LEVELS: int = 10
-    MIN_DEPTH_USD_SPOT: float = 10000.0
-    MIN_DEPTH_USD_FUTURES: float = 30000.0
+    MIN_DEPTH_USD_SPOT: float = 5000.0      # lowered for paper-sized trades
+    MIN_DEPTH_USD_FUTURES: float = 15000.0   # lowered for paper-sized trades
     DEPTH_TO_TRADE_RATIO: float = 2.0
-    LIQUIDITY_GATE_FAIL_OPEN: bool = True
+    LIQUIDITY_GATE_FAIL_OPEN: bool = True    # still pass if API fails
+
+    # Symbol Performance Gate — auto-exclude underperforming symbols
+    SYMBOL_PERF_WINDOW: int = 20           # Rolling window of trades per symbol
+    SYMBOL_MIN_PROFIT_FACTOR: float = 0.80 # Auto-exclude if PF < 0.80
+    SYMBOL_COOLDOWN_HOURS: int = 24        # How long to exclude underperformers
+
+    # Time-of-day filter — reduce size during low-liquidity windows
+    QUIET_HOURS_UTC: Tuple[Tuple[int, int], ...] = ((2, 6), (22, 24))
+    QUIET_SIZE_REDUCTION: float = 0.5      # Halve position size during quiet hours
+
+    # Momentum quality gate
+    MIN_MOMENTUM_QUALITY: int = 4          # Minimum indicator alignment score (0-10)
 
     # Alerts
     ALERT_DRAWDOWN_PCT: float = -7.0
@@ -222,8 +243,10 @@ class TradingConfig:
         self.SIDE_MARKET_FILTER = _env_bool("SIDE_MARKET_FILTER_OVERRIDE", self.SIDE_MARKET_FILTER)
         self.SIDE_MARKET_ML_OVERRIDE = _env_float("SIDE_MARKET_ML_OVERRIDE_OVERRIDE", self.SIDE_MARKET_ML_OVERRIDE)
         self.COUNTER_TREND_ML_OVERRIDE = _env_float("COUNTER_TREND_ML_OVERRIDE_OVERRIDE", self.COUNTER_TREND_ML_OVERRIDE)
-        self.MAX_HOLD_HOURS_SPOT = _env_int("MAX_HOLD_HOURS_SPOT_OVERRIDE", self.MAX_HOLD_HOURS_SPOT)
-        self.MAX_HOLD_HOURS_FUTURES = _env_int("MAX_HOLD_HOURS_FUTURES_OVERRIDE", self.MAX_HOLD_HOURS_FUTURES)
+        self.MAX_HOLD_HOURS_SPOT = _env_float("MAX_HOLD_HOURS_SPOT_OVERRIDE", self.MAX_HOLD_HOURS_SPOT)
+        self.MAX_HOLD_HOURS_FUTURES = _env_float("MAX_HOLD_HOURS_FUTURES_OVERRIDE", self.MAX_HOLD_HOURS_FUTURES)
+        self.FUTURES_TAKE_PROFIT = _env_float("FUTURES_TAKE_PROFIT_OVERRIDE", self.FUTURES_TAKE_PROFIT)
+        self.TRAILING_ACTIVATE_PCT = _env_float("TRAILING_ACTIVATE_PCT_OVERRIDE", self.TRAILING_ACTIVATE_PCT)
         self.SYMBOL_PAUSE_CONSECUTIVE_LOSSES = _env_int("SYMBOL_PAUSE_CONSECUTIVE_LOSSES_OVERRIDE", self.SYMBOL_PAUSE_CONSECUTIVE_LOSSES)
         self.MAX_POSITION_PCT = _env_float("MAX_POSITION_PCT_OVERRIDE", self.MAX_POSITION_PCT)
         self.MIN_POSITION_PCT = _env_float("MIN_POSITION_PCT_OVERRIDE", self.MIN_POSITION_PCT)
@@ -478,6 +501,7 @@ class MLModel:
         self.model = None
         self.logger = logging.getLogger("TradingBot")
         self.feature_names = list(_ML_FEATURE_NAMES)
+        self._active_features = None  # Feature indices after pruning (None = use all)
 
     def load_or_train(self, price_history: Dict[str, List[float]]):
         """Load existing model or train new one."""
@@ -597,20 +621,23 @@ class MLModel:
             class_ratio = np.mean(y)
             self.logger.info(f"After undersampling: {len(y)} samples, ratio={class_ratio:.1%}")
 
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.25, shuffle=True, stratify=y
-        )
+        # TEMPORAL SPLIT — train on first 80%, test on last 20% (no future leak)
+        split_idx = int(len(X) * 0.8)
+        X_train, X_test = X[:split_idx], X[split_idx:]
+        y_train, y_test = y[:split_idx], y[split_idx:]
 
         # Use balanced sample weights to prevent directional bias
         from sklearn.utils.class_weight import compute_sample_weight
         sample_weights = compute_sample_weight('balanced', y_train)
 
         candidate = GradientBoostingClassifier(
-            n_estimators=200,       # More trees for 15 features
-            max_depth=4,            # Slightly deeper to capture indicator interactions
+            n_estimators=100,       # Reduced from 200 (less overfitting)
+            max_depth=3,            # Reduced from 4 (shallower trees)
             learning_rate=0.05,
+            min_samples_split=20,   # Prevent small splits
             min_samples_leaf=10,
-            subsample=0.8,
+            subsample=0.8,          # Stochastic GBM
+            max_features=0.7,       # Feature subsampling
             random_state=42
         )
         candidate.fit(X_train, y_train, sample_weight=sample_weights)
@@ -618,7 +645,7 @@ class MLModel:
         train_score = candidate.score(X_train, y_train)
         test_score = candidate.score(X_test, y_test)
 
-        self.logger.info(f"Model trained — Train: {train_score:.2%}, Test: {test_score:.2%}")
+        self.logger.info(f"Model trained — Train: {train_score:.2%}, Test(OOS): {test_score:.2%}")
 
         # Log top feature importances
         try:
@@ -630,15 +657,56 @@ class MLModel:
             pass
 
         # Quality gate: reject models that don't beat random
-        if test_score < cfg.MIN_MODEL_TEST_ACCURACY:
+        if test_score < 0.55:
             self.logger.warning(
-                f"Model REJECTED: test accuracy {test_score:.2%} < "
-                f"minimum {cfg.MIN_MODEL_TEST_ACCURACY:.2%}. Using previous model or none."
+                f"Model REJECTED: OOS accuracy {test_score:.2%} < 55% minimum. "
+                f"Using previous model or none."
             )
             return
 
+        # Overfitting gate: reject if train-test gap > 25%
+        if train_score > 0 and (train_score - test_score) > 0.25:
+            self.logger.warning(
+                f"Model REJECTED: overfitting detected — Train={train_score:.2%} vs "
+                f"OOS={test_score:.2%} (gap={train_score - test_score:.2%} > 25%). "
+                f"Using previous model or none."
+            )
+            return
+
+        # Feature importance pruning — drop near-zero features and retrain
+        try:
+            importances = candidate.feature_importances_
+            top_features = [i for i, imp in enumerate(importances) if imp > 0.02]
+            if len(top_features) >= 5 and len(top_features) < len(importances):
+                X_train_pruned = X_train[:, top_features]
+                X_test_pruned = X_test[:, top_features]
+                sample_weights_pruned = compute_sample_weight('balanced', y_train)
+                candidate2 = GradientBoostingClassifier(
+                    n_estimators=100, max_depth=3, learning_rate=0.05,
+                    min_samples_split=20, min_samples_leaf=10,
+                    subsample=0.8, max_features=0.7, random_state=42
+                )
+                candidate2.fit(X_train_pruned, y_train, sample_weight=sample_weights_pruned)
+                test_score2 = candidate2.score(X_test_pruned, y_test)
+                if test_score2 >= test_score:
+                    candidate = candidate2
+                    test_score = test_score2
+                    self._active_features = top_features
+                    kept = [self.feature_names[i] for i in top_features]
+                    self.logger.info(
+                        f"Feature pruning applied: kept {len(top_features)}/{len(importances)} "
+                        f"features ({', '.join(kept)}), OOS={test_score2:.2%}"
+                    )
+                else:
+                    self._active_features = None
+            else:
+                self._active_features = None
+        except Exception as e:
+            self.logger.debug(f"Feature pruning skipped: {e}")
+            self._active_features = None
+
         self.model = candidate
-        self.logger.info(f"Model ACCEPTED: test accuracy {test_score:.2%}")
+        self.logger.info(f"Model ACCEPTED: OOS accuracy {test_score:.2%}, Train={train_score:.2%}")
 
         # Save (with accuracy in filename for tracking)
         os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
@@ -677,6 +745,13 @@ class MLModel:
 
         features_arr = np.array(features).reshape(1, -1)
         features_arr = np.nan_to_num(features_arr, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Apply feature pruning if active
+        if self._active_features is not None:
+            try:
+                features_arr = features_arr[:, self._active_features]
+            except Exception:
+                pass  # Fall back to full features
 
         try:
             proba = self.model.predict_proba(features_arr)[0]
@@ -882,6 +957,7 @@ class RiskManager:
     def __init__(self, logger: logging.Logger):
         self.logger = logger
         self.consecutive_losses = 0
+        self.consecutive_wins = 0
         self.daily_pnl = 0.0
         self.peak_balance = 0.0
         self.current_balance = 0.0
@@ -908,11 +984,13 @@ class RiskManager:
         # Update daily P&L
         self.daily_pnl += pnl
 
-        # Update consecutive losses
+        # Update consecutive losses/wins
         if pnl < 0:
             self.consecutive_losses += 1
+            self.consecutive_wins = 0
         else:
             self.consecutive_losses = 0
+            self.consecutive_wins += 1
 
     def can_trade(self) -> Tuple[bool, str]:
         """Check if trading is allowed."""
@@ -993,6 +1071,30 @@ class TradingBot:
         self.risk_manager = RiskManager(self.logger)
         self.last_train_attempt_cycle = 0
         self.last_model_retrain = datetime.now()
+
+        # Regime Detection
+        try:
+            from cryptotrades.utils.regime_detector import RegimeDetector
+        except ImportError:
+            try:
+                from utils.regime_detector import RegimeDetector
+            except ImportError:
+                RegimeDetector = None
+        if RegimeDetector is not None:
+            self.regime_detector = RegimeDetector(bot_name="CryptoBot")
+            self.logger.info("RegimeDetector loaded successfully")
+        else:
+            self.regime_detector = None
+            self.logger.warning("RegimeDetector not available")
+        self._current_regime = None
+        self._regime_adjustments = {}
+        self._regime_last_update = 0
+        self._regime_flip_state = {}  # Flip detection state
+
+        # Symbol performance gate
+        self._symbol_perf_cache: Dict[str, Dict] = {}  # {symbol: {pf, last_check, trades}}
+        self._symbol_perf_excluded_until: Dict[str, datetime] = {}
+        self._symbol_perf_bootstrapped = False
         self.enable_futures_data = os.getenv("ENABLE_FUTURES", "true").lower() == "true"
         self.enable_coinbase_futures_data = os.getenv("ENABLE_COINBASE_FUTURES_DATA", "true").lower() == "true"
         self.enable_kraken_futures_fallback = os.getenv("ENABLE_KRAKEN_FUTURES_FALLBACK", "true").lower() == "true"
@@ -1095,6 +1197,31 @@ class TradingBot:
         self.client = None
         self._init_api()
 
+        # Universe Scanner — dynamic coin discovery
+        try:
+            from core.universe_scanner import CryptoUniverseScanner
+            self.universe_scanner = CryptoUniverseScanner(
+                core_symbols=list(cfg.SPOT_SYMBOLS)
+            )
+            self.logger.info("Universe Scanner loaded — dynamic coin discovery enabled")
+        except Exception as e:
+            self.universe_scanner = None
+            self.logger.warning(f"Universe Scanner not available: {e}")
+        self._dynamic_spot_symbols = list(cfg.SPOT_SYMBOLS)
+        self._dynamic_futures_symbols = list(cfg.FUTURES_SYMBOLS)
+        self._last_universe_scan = None
+
+        # Performance Engine — concurrent fetcher + GPU model
+        try:
+            from core.perf_engine import ConcurrentPriceFetcher, GPUModel
+            self._concurrent_fetcher = ConcurrentPriceFetcher(max_workers=10)
+            self._gpu_model = GPUModel(n_features=len(_ML_FEATURE_NAMES))
+            self.logger.info("Performance Engine loaded — concurrent fetch + GPU ML")
+        except Exception as e:
+            self._concurrent_fetcher = None
+            self._gpu_model = None
+            self.logger.warning(f"Performance Engine not available: {e}")
+
         # Load history if exists
         self._load_state()
 
@@ -1113,17 +1240,25 @@ class TradingBot:
             except Exception as e:
                 self.logger.warning(f"Forced ML retrain at startup failed: {e}")
 
+        # GPU model startup training
+        if self._gpu_model is not None and not self._gpu_model.ready:
+            try:
+                self._retrain_gpu_model()
+            except Exception as e:
+                self.logger.warning(f"GPU model startup training failed: {e}")
+
         # Signals
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
         self.logger.info("=" * 60)
-        self.logger.info("PRODUCTION TRADING BOT v5.0 — QUALITY-FIRST")
+        self.logger.info("PRODUCTION TRADING BOT v6.0 — REGIME-AWARE QUALITY-FIRST")
         self.logger.info(f"Mode: {'PAPER' if cfg.PAPER_TRADING else 'LIVE'}")
         self.logger.info(f"Risk Check: {cfg.RISK_CHECK_INTERVAL}s | Trade Cycle: {cfg.TRADE_CYCLE_INTERVAL * cfg.RISK_CHECK_INTERVAL}s")
         self.logger.info(
             f"Risk: SL_spot={cfg.STOP_LOSS_PCT}% SL_fut={cfg.FUTURES_STOP_LOSS}% "
-            f"TP={cfg.TAKE_PROFIT_PCT}% Trail={cfg.TRAILING_STOP_PCT}% "
+            f"TP_spot={cfg.TAKE_PROFIT_PCT}% TP_fut={cfg.FUTURES_TAKE_PROFIT}% "
+            f"Trail={cfg.TRAILING_STOP_PCT}%@{cfg.TRAILING_ACTIVATE_PCT}% "
             f"MaxHold={cfg.MAX_HOLD_HOURS_SPOT}h/{cfg.MAX_HOLD_HOURS_FUTURES}h"
         )
         self.logger.info(
@@ -1146,7 +1281,13 @@ class TradingBot:
         self.logger.info(
             f"Model status: ml_ready={'yes' if self.ml_model.model is not None else 'no'} | "
             f"rl_shadow={'on' if self.rl_shadow_mode else 'off'} | "
-            f"rl_live_size={'on' if self.rl_live_size_control else 'off'}"
+            f"rl_live_size={'on' if self.rl_live_size_control else 'off'} | "
+            f"regime_detector={'on' if self.regime_detector else 'off'}"
+        )
+        self.logger.info(
+            f"New gates: symbol_perf_PF>={cfg.SYMBOL_MIN_PROFIT_FACTOR} "
+            f"momentum_quality>={cfg.MIN_MOMENTUM_QUALITY} "
+            f"quiet_hours_reduction={cfg.QUIET_SIZE_REDUCTION}"
         )
         self.logger.info("=" * 60)
 
@@ -2400,39 +2541,85 @@ class TradingBot:
             self.logger.info("Scheduled model retrain completed")
         except Exception as e:
             self.logger.warning(f"Scheduled retrain failed: {e}")
-        finally:
-            self.last_model_retrain = datetime.now()
+
+        # GPU model retrain alongside sklearn
+        if self._gpu_model is not None:
+            try:
+                self._retrain_gpu_model()
+            except Exception as e:
+                self.logger.warning(f"GPU retrain failed: {e}")
+
+        self.last_model_retrain = datetime.now()
+
+    def _retrain_gpu_model(self):
+        """Train GPU neural net on same data as sklearn model."""
+        if self._gpu_model is None:
+            return
+
+        X, y = [], []
+        for symbol, prices in self.market_data.price_history.items():
+            max_points = 2000
+            recent = prices[-max_points:] if len(prices) > max_points else prices
+            hourly = self.ml_model._aggregate_to_hourly(recent, 60)
+            if len(hourly) < 60:
+                continue
+            for i in range(50, len(hourly) - 10):
+                features = self.ml_model._extract_features(hourly[:i])
+                if features is not None:
+                    future_return = (hourly[i + 10] - hourly[i]) / hourly[i]
+                    if abs(future_return) < 0.002:
+                        continue
+                    X.append(features)
+                    y.append(1 if future_return > 0.005 else 0)
+
+        if len(X) >= 200:
+            self._gpu_model.train(np.array(X), np.array(y))
 
     def fetch_prices(self):
-        """Fetch current prices."""
-        symbols = list(cfg.SPOT_SYMBOLS)
+        """Fetch current prices — concurrent when available."""
+        symbols = list(self._dynamic_spot_symbols)
 
-        for i, symbol in enumerate(symbols):
-            price: Optional[float] = None
-            retries = cfg.PRICE_FETCH_RETRIES
-
-            while retries > 0 and price is None:
-                try:
-                    if self.client:
-                        price = float(self.client.get_spot_price(currency_pair=symbol)['amount'])
-                    else:
-                        price = self._fetch_public_spot_price(symbol)
-                except Exception as e:
-                    self.logger.debug(f"Authenticated fetch failed for {symbol}: {e}")
-                    price = self._fetch_public_spot_price(symbol)
-
-                if price is None:
-                    retries -= 1
-                    if retries > 0:
-                        time.sleep(cfg.PRICE_FETCH_RETRY_DELAY_SEC)
-
-            if price is not None:
+        # Use concurrent fetcher if available (10× faster for 100+ symbols)
+        if self._concurrent_fetcher and len(symbols) > 5:
+            prices = self._concurrent_fetcher.fetch_all_spot(
+                symbols=symbols,
+                client=self.client,
+                retries=cfg.PRICE_FETCH_RETRIES,
+                retry_delay=cfg.PRICE_FETCH_RETRY_DELAY_SEC,
+            )
+            for symbol, price in prices.items():
                 self.market_data.update_price(symbol, price)
-            else:
-                self.logger.error(f"Failed to fetch {symbol} after {cfg.PRICE_FETCH_RETRIES} retries")
+            failed = len(symbols) - len(prices)
+            if failed > 0:
+                self.logger.warning(f"Concurrent fetch: {failed} symbols failed")
+        else:
+            # Fallback to sequential fetching
+            for i, symbol in enumerate(symbols):
+                price: Optional[float] = None
+                retries = cfg.PRICE_FETCH_RETRIES
 
-            if i < len(symbols) - 1:
-                time.sleep(cfg.PRICE_FETCH_RATE_LIMIT_SEC)
+                while retries > 0 and price is None:
+                    try:
+                        if self.client:
+                            price = float(self.client.get_spot_price(currency_pair=symbol)['amount'])
+                        else:
+                            price = self._fetch_public_spot_price(symbol)
+                    except Exception as e:
+                        self.logger.debug(f"Authenticated fetch failed for {symbol}: {e}")
+                        price = self._fetch_public_spot_price(symbol)
+
+                    if price is None:
+                        retries -= 1
+                        if retries > 0:
+                            time.sleep(cfg.PRICE_FETCH_RETRY_DELAY_SEC)
+
+                if price is not None:
+                    self.market_data.update_price(symbol, price)
+                else:
+                    self.logger.error(f"Failed to fetch {symbol} after {cfg.PRICE_FETCH_RETRIES} retries")
+
+                if i < len(symbols) - 1:
+                    time.sleep(cfg.PRICE_FETCH_RATE_LIMIT_SEC)
 
         if self.enable_futures_data:
             self.fetch_futures_prices()
@@ -2468,7 +2655,28 @@ class TradingBot:
             # Check exits
             should_exit = False
             exit_reason = ""
-            stop_loss_pct = cfg.FUTURES_STOP_LOSS if symbol.startswith("PI_") else cfg.STOP_LOSS_PCT
+            is_futures = symbol.startswith("PI_")
+            stop_loss_pct = cfg.FUTURES_STOP_LOSS if is_futures else cfg.STOP_LOSS_PCT
+            take_profit_pct = cfg.FUTURES_TAKE_PROFIT if is_futures else cfg.TAKE_PROFIT_PCT
+
+            # CHANGE 6C: Adaptive ATR-based stop loss
+            if _compute_indicators is not None and len(hist) >= 30:
+                try:
+                    indicators = _compute_indicators(hist)
+                    atr_norm = indicators.get('atr_14', 0)
+                    if atr_norm > 0:
+                        atr_stop = atr_norm * 100 * 1.5  # 1.5x ATR as stop distance
+                        atr_stop_pct = -atr_stop
+                        # Use ATR or fixed, whichever is tighter (more negative = wider)
+                        stop_loss_pct = max(stop_loss_pct, atr_stop_pct)
+                        # Floor at -0.8% to avoid premature stops in quiet markets
+                        stop_loss_pct = min(stop_loss_pct, -0.8)
+                except Exception:
+                    pass
+
+            # CHANGE 5: Regime-based stop tightening
+            if self._current_regime == "HIGH_VOLATILITY":
+                stop_loss_pct = stop_loss_pct * 0.7  # 30% tighter stops in high vol
 
             # Stop Loss
             if pnl_pct <= stop_loss_pct:
@@ -2476,19 +2684,19 @@ class TradingBot:
                 exit_reason = "STOP_LOSS"
 
             # Take Profit
-            elif pnl_pct >= cfg.TAKE_PROFIT_PCT:
+            elif pnl_pct >= take_profit_pct:
                 should_exit = True
                 exit_reason = "TAKE_PROFIT"
 
-            # Trailing Stop
+            # CHANGE 2: Fixed Trailing Stop — uses TRAILING_ACTIVATE_PCT instead of hardcoded 1.0
             elif position.direction == "LONG":
                 drawdown_from_max = (position.max_price - current_price) / max(position.max_price, 1e-12) * 100
-                if drawdown_from_max >= cfg.TRAILING_STOP_PCT and pnl_pct > 1.0:
+                if drawdown_from_max >= cfg.TRAILING_STOP_PCT and pnl_pct > cfg.TRAILING_ACTIVATE_PCT:
                     should_exit = True
                     exit_reason = "TRAILING_STOP"
             elif position.direction == "SHORT":
                 rebound_from_min = (current_price - position.max_price) / max(position.max_price, 1e-12) * 100
-                if rebound_from_min >= cfg.TRAILING_STOP_PCT and pnl_pct > 1.0:
+                if rebound_from_min >= cfg.TRAILING_STOP_PCT and pnl_pct > cfg.TRAILING_ACTIVATE_PCT:
                     should_exit = True
                     exit_reason = "TRAILING_STOP"
 
@@ -2510,14 +2718,30 @@ class TradingBot:
 
             # Max hold time exit — close flat positions that go nowhere
             if not should_exit:
-                max_hold_h = cfg.MAX_HOLD_HOURS_FUTURES if symbol.startswith("PI_") else cfg.MAX_HOLD_HOURS_SPOT
+                max_hold_h = cfg.MAX_HOLD_HOURS_FUTURES if is_futures else cfg.MAX_HOLD_HOURS_SPOT
+                max_hold_forced_h = cfg.MAX_HOLD_FORCED_HOURS_FUTURES if is_futures else cfg.MAX_HOLD_FORCED_HOURS_SPOT
+
+                # CHANGE 5: Regime-based max hold tightening
+                if self._current_regime == "HIGH_VOLATILITY":
+                    max_hold_h = min(max_hold_h, 1.5 if is_futures else 2.0)
+                elif self._current_regime == "RANGING":
+                    max_hold_h = min(max_hold_h, 1.0 if is_futures else 1.5)
+
                 hold_duration = datetime.now() - position.entry_time
-                if hold_duration >= timedelta(hours=max_hold_h):
+                hold_minutes = hold_duration.total_seconds() / 60
+                max_hold_minutes = max_hold_h * 60
+
+                # CHANGE 7: Confidence decay over hold time — cut flat positions early
+                hold_pct = hold_minutes / max_hold_minutes if max_hold_minutes > 0 else 0
+                if hold_pct > 0.60 and abs(pnl_pct) < 0.3:
+                    should_exit = True
+                    exit_reason = "HOLD_DECAY"
+
+                if not should_exit and hold_duration >= timedelta(hours=max_hold_h):
                     if abs(pnl_pct) < cfg.MAX_HOLD_FLAT_BAND_PCT:
                         should_exit = True
                         exit_reason = "MAX_HOLD_FLAT"
-                    elif hold_duration >= timedelta(hours=max_hold_h * 2):
-                        # Double the max hold time: close regardless of P/L
+                    elif hold_duration >= timedelta(hours=max_hold_forced_h):
                         should_exit = True
                         exit_reason = "MAX_HOLD_FORCED"
 
@@ -2631,11 +2855,219 @@ class TradingBot:
             self.logger.info(f"DIRECTION-UNPAUSE: {direction} pause expired, direction re-enabled")
         return False
 
+    # ── CHANGE 1: Per-Symbol Performance Gate ──────────────────────────────
+    def _check_symbol_health(self, symbol: str) -> bool:
+        """Check if symbol is healthy based on rolling profit factor from trades.csv.
+
+        Returns True if symbol is OK to trade, False if excluded.
+        """
+        # Check if already excluded and in cooldown
+        excluded_until = self._symbol_perf_excluded_until.get(symbol)
+        if excluded_until:
+            if datetime.now() < excluded_until:
+                return False  # Still in cooldown
+            else:
+                del self._symbol_perf_excluded_until[symbol]
+                self.logger.info(f"SYMBOL-HEALTH: {symbol} cooldown expired, re-enabled")
+
+        # Bootstrap from trades.csv on first call
+        if not self._symbol_perf_bootstrapped:
+            self._bootstrap_symbol_perf()
+            self._symbol_perf_bootstrapped = True
+
+        # Check cached result (re-evaluate every 50 cycles to avoid re-reading csv every time)
+        cached = self._symbol_perf_cache.get(symbol)
+        if cached and (self.cycle - cached.get("last_cycle", 0)) < 50:
+            return cached.get("healthy", True)
+
+        # Compute profit factor from recent trades
+        try:
+            trades = self._load_symbol_trades(symbol)
+            if len(trades) < 5:
+                # Not enough history to judge
+                self._symbol_perf_cache[symbol] = {"healthy": True, "last_cycle": self.cycle, "pf": None}
+                return True
+
+            recent = trades[-cfg.SYMBOL_PERF_WINDOW:]
+            wins = sum(t for t in recent if t > 0)
+            losses = abs(sum(t for t in recent if t < 0))
+            pf = wins / losses if losses > 0 else (10.0 if wins > 0 else 0.0)
+
+            if pf < cfg.SYMBOL_MIN_PROFIT_FACTOR:
+                # Exclude this symbol
+                self._symbol_perf_excluded_until[symbol] = datetime.now() + timedelta(hours=cfg.SYMBOL_COOLDOWN_HOURS)
+                self._symbol_perf_cache[symbol] = {"healthy": False, "last_cycle": self.cycle, "pf": pf}
+                wr = sum(1 for t in recent if t > 0) / len(recent) * 100
+                self.logger.warning(
+                    f"SYMBOL-HEALTH: {symbol} EXCLUDED for {cfg.SYMBOL_COOLDOWN_HOURS}h | "
+                    f"PF={pf:.2f} < {cfg.SYMBOL_MIN_PROFIT_FACTOR} | "
+                    f"WR={wr:.0f}% over last {len(recent)} trades"
+                )
+                return False
+
+            self._symbol_perf_cache[symbol] = {"healthy": True, "last_cycle": self.cycle, "pf": pf}
+            return True
+        except Exception as e:
+            self.logger.debug(f"Symbol health check failed for {symbol}: {e}")
+            return True  # Fail open
+
+    def _bootstrap_symbol_perf(self):
+        """Load trades.csv once and pre-populate symbol performance cache."""
+        try:
+            csv_path = "data/trades.csv"
+            if not os.path.exists(csv_path):
+                return
+            df = pd.read_csv(csv_path)
+            if df.empty or 'symbol' not in df.columns or 'pnl_usd' not in df.columns:
+                return
+            for symbol in df['symbol'].unique():
+                sym_trades = df[df['symbol'] == symbol]['pnl_usd'].tolist()
+                recent = sym_trades[-cfg.SYMBOL_PERF_WINDOW:]
+                if len(recent) < 5:
+                    continue
+                wins = sum(t for t in recent if t > 0)
+                losses = abs(sum(t for t in recent if t < 0))
+                pf = wins / losses if losses > 0 else (10.0 if wins > 0 else 0.0)
+                self._symbol_perf_cache[symbol] = {"healthy": pf >= cfg.SYMBOL_MIN_PROFIT_FACTOR, "last_cycle": 0, "pf": pf}
+                if pf < cfg.SYMBOL_MIN_PROFIT_FACTOR:
+                    self._symbol_perf_excluded_until[symbol] = datetime.now() + timedelta(hours=cfg.SYMBOL_COOLDOWN_HOURS)
+                    self.logger.warning(f"SYMBOL-HEALTH: {symbol} excluded at startup (PF={pf:.2f})")
+        except Exception as e:
+            self.logger.debug(f"Symbol perf bootstrap failed: {e}")
+
+    def _load_symbol_trades(self, symbol: str) -> List[float]:
+        """Load recent P&L values for a symbol from trades.csv."""
+        try:
+            csv_path = "data/trades.csv"
+            if not os.path.exists(csv_path):
+                return []
+            df = pd.read_csv(csv_path)
+            if df.empty:
+                return []
+            # Match both the exact symbol and any futures equivalent
+            sym_df = df[df['symbol'] == symbol]
+            return sym_df['pnl_usd'].tolist()
+        except Exception:
+            return []
+
+    # ── CHANGE 5: Regime Detection Update ──────────────────────────────────
+    def _update_regime(self):
+        """Update market regime detection (cached, runs every 15 minutes)."""
+        if self.regime_detector is None:
+            return
+
+        now = time.time()
+        if now - self._regime_last_update < 900:  # 15 minutes
+            return
+
+        self._regime_last_update = now
+
+        # Use BTC-USD as reference market, fall back to any symbol with enough data
+        ref_symbol = "BTC-USD"
+        hist = self.market_data.price_history.get(ref_symbol, [])
+        if len(hist) < 50:
+            # Try any symbol with enough data
+            for sym, prices in self.market_data.price_history.items():
+                if len(prices) >= 50:
+                    hist = prices
+                    ref_symbol = sym
+                    break
+
+        if len(hist) < 50:
+            self.logger.debug("Regime detection skipped: insufficient price data")
+            return
+
+        try:
+            # Build bar-like dicts from price history for the detector
+            bars = []
+            for i in range(1, len(hist)):
+                bars.append({
+                    "close": hist[i],
+                    "high": max(hist[i], hist[i-1]),
+                    "low": min(hist[i], hist[i-1]),
+                    "volume": 0,
+                })
+
+            if len(bars) < 30:
+                return
+
+            result = self.regime_detector.detect(bars)
+            old_regime = self._current_regime
+            self._current_regime = result.get("regime", "RANGING")
+            self._regime_adjustments = result.get("suggested_adjustments", {})
+
+            # ── Regime Flip Detection ────────────────────
+            confidence = result.get("confidence", 0.0)
+            flip_state = self.regime_detector.record_regime(self._current_regime, confidence)
+            self._regime_flip_state = flip_state
+
+            if self._current_regime != old_regime and old_regime is not None:
+                self.logger.warning(
+                    f"REGIME FLIP: {old_regime} → {self._current_regime} | "
+                    f"severity={flip_state['flip_severity']:.2f}, "
+                    f"cooldown={flip_state['cooldown_remaining_min']:.0f}m, "
+                    f"whipsaw={flip_state['whipsaw_score']:.2f}, "
+                    f"mult={flip_state['adjustment_multiplier']:.2f}, "
+                    f"block_entries={flip_state['should_block_entries']}"
+                )
+            else:
+                self.logger.debug(
+                    f"Regime: {self._current_regime} (conf={confidence:.2f}) | "
+                    f"{self.regime_detector.get_regime_summary()}"
+                )
+        except Exception as e:
+            self.logger.debug(f"Regime detection failed: {e}")
+
+    # ── CHANGE 6B: Momentum Quality Score ──────────────────────────────────
+    def _compute_momentum_quality(self, symbol: str, rsi: float) -> int:
+        """Score 0-10 based on indicator alignment strength."""
+        score = 0
+        hist = self.market_data.price_history.get(symbol, [])
+        if len(hist) < 30 or _compute_indicators is None:
+            return 5  # Neutral if can't compute
+
+        try:
+            indicators = _compute_indicators(hist)
+            if not indicators:
+                return 5
+
+            # RSI divergence from neutral
+            rsi_val = indicators.get("rsi_14", 50.0)
+            if abs(rsi_val - 50) > 15:
+                score += 2
+
+            # MACD histogram strength
+            macd_hist = indicators.get("macd_histogram", 0)
+            if abs(macd_hist) > 0.001:
+                score += 2
+
+            # Stochastic extremes
+            stoch_k = indicators.get("stoch_k", 50.0)
+            if stoch_k < 20 or stoch_k > 80:
+                score += 2
+
+            # Bollinger Band position (near edges)
+            bb_pos = indicators.get("bb_position", 0.5)
+            if abs(bb_pos - 0.5) > 0.3:
+                score += 2
+
+            # Mean reversion z-score strength
+            mr_z = indicators.get("mean_reversion", 0)
+            if abs(mr_z) > 1.5:
+                score += 2
+
+            return score
+        except Exception:
+            return 5  # Neutral on error
+
     def generate_signals(self) -> List[Signal]:
         """Generate trading signals with quality filters."""
         signals = []
         # NOTE: AGGRESSIVE_FUTURES_BURST no longer bypasses quality gates.
         # It only controls trade cycle speed (already handled in __post_init__).
+
+        # Update regime detection (cached, every 15 min)
+        self._update_regime()
 
         # Get sentiment
         global_sent, coin_sent = self.sentiment.fetch_sentiment()
@@ -2644,13 +3076,15 @@ class TradingBot:
             f"Sentiment status: source={sentiment_status['source']} value={sentiment_status['value']} "
             f"last_success={sentiment_status['last_success']}"
         )
+        if self._current_regime:
+            self.logger.info(f"Current regime: {self._current_regime}")
 
-        symbols = list(cfg.SPOT_SYMBOLS)
+        symbols = list(self._dynamic_spot_symbols)
         if self.enable_futures_data:
-            symbols.extend(cfg.FUTURES_SYMBOLS)
+            symbols.extend(self._dynamic_futures_symbols)
             futures_points = [
                 f"{symbol}:{len(self.market_data.price_history.get(symbol, []))}"
-                for symbol in cfg.FUTURES_SYMBOLS
+                for symbol in self._dynamic_futures_symbols
             ]
             self.logger.info("Futures history points: " + ", ".join(futures_points))
 
@@ -2662,11 +3096,31 @@ class TradingBot:
 
         skipped_blacklist = 0
         skipped_direction_pause = 0
+        skipped_symbol_health = 0
+        skipped_low_volatility = 0
+        skipped_momentum_quality = 0
+        skipped_regime_block = 0
+
+        # Regime-based ML confidence adjustments
+        regime_ml_threshold = cfg.MIN_ML_CONFIDENCE
+        if self._current_regime == "HIGH_VOLATILITY":
+            regime_ml_threshold = 0.80
+        elif self._current_regime == "RANGING":
+            regime_ml_threshold = 0.75
+        elif self._current_regime == "TRENDING_DOWN":
+            regime_ml_threshold = 0.66  # Default, but block LONGs unless very high
+        elif self._current_regime == "TRENDING_UP":
+            regime_ml_threshold = 0.63  # Slightly looser in bull regime
 
         for symbol in symbols:
             # Symbol blacklist check
             if symbol in cfg.SYMBOL_BLACKLIST:
                 skipped_blacklist += 1
+                continue
+
+            # CHANGE 1: Per-symbol performance gate
+            if not self._check_symbol_health(symbol):
+                skipped_symbol_health += 1
                 continue
 
             hist = self.market_data.price_history.get(symbol, [])
@@ -2678,13 +3132,28 @@ class TradingBot:
                 skipped_paused += 1
                 continue
 
-            # ML Prediction
+            # ML Prediction (sklearn + GPU ensemble)
             ml_pred = self.ml_model.predict(hist)
+
+            # GPU model ensemble — average sklearn + neural net predictions
+            if self._gpu_model is not None and self._gpu_model.ready:
+                features = self.ml_model._extract_features(hist)
+                if features is not None:
+                    gpu_pred = self._gpu_model.predict(np.array(features))
+                    # Weighted ensemble: 60% sklearn (proven), 40% GPU (neural net)
+                    ml_pred = {
+                        'direction': ml_pred['direction'] * 0.6 + gpu_pred['direction'] * 0.4,
+                        'confidence': ml_pred['confidence'] * 0.6 + gpu_pred['confidence'] * 0.4,
+                        'up_prob': ml_pred['up_prob'] * 0.6 + gpu_pred['up_prob'] * 0.4,
+                        'down_prob': ml_pred.get('down_prob', 0.5) * 0.6 + gpu_pred.get('down_prob', 0.5) * 0.4,
+                    }
+
             ml_conf = ml_pred['confidence']
             ml_direction = ml_pred['direction']  # >0.5 = up, <0.5 = down
 
-            # Strict confidence gate — no bypasses
-            if ml_conf < cfg.MIN_ML_CONFIDENCE:
+            # Strict confidence gate — regime-adjusted threshold
+            effective_ml_threshold = max(cfg.MIN_ML_CONFIDENCE, regime_ml_threshold)
+            if ml_conf < effective_ml_threshold:
                 skipped_confidence += 1
                 continue
 
@@ -2692,6 +3161,27 @@ class TradingBot:
             rsi = self.market_data.calculate_rsi(symbol)
             trend, slope = self.market_data.calculate_trend(symbol)
             vol = self.market_data.calculate_volatility(symbol)
+
+            # CHANGE 3A: Minimum Expected Move Filter — skip if market too quiet
+            if _compute_indicators is not None and len(hist) >= 30:
+                try:
+                    indicators = _compute_indicators(hist)
+                    atr_14 = indicators.get('atr_14', 0) * hist[-1]  # Un-normalize ATR
+                    if hist[-1] > 0 and atr_14 > 0:
+                        atr_pct = (atr_14 / hist[-1]) * 100
+                        tp_target = cfg.FUTURES_TAKE_PROFIT if symbol.startswith('PI_') else cfg.TAKE_PROFIT_PCT
+                        expected_move = atr_pct * math.sqrt(4)  # approx 4h move from hourly ATR
+                        if expected_move < tp_target * 0.5:
+                            skipped_low_volatility += 1
+                            continue  # Market too quiet, won't reach TP
+                except Exception:
+                    pass
+
+            # CHANGE 6B: Momentum quality gate
+            momentum_quality = self._compute_momentum_quality(symbol, rsi)
+            if momentum_quality < cfg.MIN_MOMENTUM_QUALITY:
+                skipped_momentum_quality += 1
+                continue
 
             # SIDE-market filter: skip sideways markets unless ML is very confident
             if cfg.SIDE_MARKET_FILTER and trend == "SIDE":
@@ -2759,6 +3249,28 @@ class TradingBot:
             elif direction == "SHORT" and cfg.DIRECTION_MODE == "long_only":
                 direction = None  # Block SHORT entries
 
+            # CHANGE 5: Regime-based direction blocking
+            if direction and self._current_regime:
+                if self._current_regime == "TRENDING_DOWN" and direction == "LONG":
+                    if ml_conf < 0.90:
+                        skipped_regime_block += 1
+                        direction = None  # Block LONG in downtrend unless ML >= 90%
+                    else:
+                        confidence = ml_conf * 0.60  # Heavy penalty even with high conf
+                if self._current_regime == "RANGING" and trend == "SIDE":
+                    skipped_regime_block += 1
+                    direction = None  # Skip SIDE entries in RANGING regime entirely
+
+            # Regime flip cooldown — block entries during dangerous transitions
+            if direction and self._regime_flip_state.get("should_block_entries", False):
+                self.logger.debug(
+                    f"  {symbol}: BLOCKED by regime flip cooldown "
+                    f"(severity={self._regime_flip_state.get('flip_severity', 0):.2f}, "
+                    f"remaining={self._regime_flip_state.get('cooldown_remaining_min', 0):.0f}m)"
+                )
+                skipped_regime_block += 1
+                direction = None
+
             # Direction Performance Tracker — skip if direction is paused
             if direction and self._is_direction_paused(direction):
                 skipped_direction_pause += 1
@@ -2787,12 +3299,14 @@ class TradingBot:
                     timestamp=datetime.now()
                 ))
 
-        if skipped_side or skipped_paused or skipped_confidence or skipped_trend_mismatch or skipped_blacklist or skipped_direction_pause:
+        if skipped_side or skipped_paused or skipped_confidence or skipped_trend_mismatch or skipped_blacklist or skipped_direction_pause or skipped_symbol_health or skipped_low_volatility or skipped_momentum_quality or skipped_regime_block:
             self.logger.info(
                 f"Signal filters: skipped_SIDE={skipped_side} skipped_paused={skipped_paused} "
                 f"skipped_low_conf={skipped_confidence} skipped_trend_mismatch={skipped_trend_mismatch} "
                 f"skipped_blacklist={skipped_blacklist} skipped_dir_pause={skipped_direction_pause} "
-                f"direction_mode={cfg.DIRECTION_MODE}"
+                f"skipped_sym_health={skipped_symbol_health} skipped_low_vol={skipped_low_volatility} "
+                f"skipped_momentum={skipped_momentum_quality} skipped_regime={skipped_regime_block} "
+                f"direction_mode={cfg.DIRECTION_MODE} regime={self._current_regime or 'N/A'}"
             )
         if counter_trend_taken:
             self.logger.info(f"Counter-trend signals generated: {counter_trend_taken}")
@@ -2911,6 +3425,42 @@ class TradingBot:
                 position_count
             )
 
+            # CHANGE 6A: Time-of-day filter — reduce size during quiet hours
+            try:
+                utc_hour = datetime.now(timezone.utc).hour
+                for start_h, end_h in cfg.QUIET_HOURS_UTC:
+                    if start_h <= utc_hour < end_h:
+                        size *= cfg.QUIET_SIZE_REDUCTION
+                        break
+            except Exception:
+                pass
+
+            # CHANGE 6E: Win-streak scaling
+            streak_factor = 1.0
+            if self.risk_manager.consecutive_wins >= 3:
+                streak_factor = min(1.3, 1.0 + self.risk_manager.consecutive_wins * 0.05)
+            elif self.risk_manager.consecutive_losses >= 2:
+                streak_factor = max(0.5, 1.0 - self.risk_manager.consecutive_losses * 0.1)
+            size *= streak_factor
+
+            # CHANGE 5: Regime-based position sizing
+            if self._current_regime and self._regime_adjustments:
+                regime_size_mult = self._regime_adjustments.get("position_size", 1.0)
+                size *= regime_size_mult
+            # Additional regime penalty for TRENDING_DOWN
+            if self._current_regime == "TRENDING_DOWN":
+                size *= 0.60  # Reduce to 60% in downtrends
+
+            # Regime flip position sizing reduction
+            flip_mult = self._regime_flip_state.get("adjustment_multiplier", 1.0)
+            if flip_mult < 1.0:
+                size *= flip_mult
+                self.logger.debug(
+                    f"  Flip sizing: {flip_mult:.2f}x "
+                    f"(cooldown={self._regime_flip_state.get('is_cooldown', False)}, "
+                    f"whipsaw={self._regime_flip_state.get('whipsaw_score', 0):.2f})"
+                )
+
             min_trade_size = max(10.0, total_balance * cfg.MIN_POSITION_PCT)
             # For futures, leverage reduces capital needed — adjust min accordingly
             effective_min = min_trade_size / cfg.FUTURES_LEVERAGE if is_futures and cfg.FUTURES_LEVERAGE > 1 else min_trade_size
@@ -2989,12 +3539,13 @@ class TradingBot:
 
             # Set stops
             stop_loss_pct = cfg.FUTURES_STOP_LOSS if is_futures else cfg.STOP_LOSS_PCT
+            take_profit_pct = cfg.FUTURES_TAKE_PROFIT if is_futures else cfg.TAKE_PROFIT_PCT
             if signal.direction == "LONG":
                 stop = price * (1 + stop_loss_pct / 100)
-                target = price * (1 + cfg.TAKE_PROFIT_PCT / 100)
+                target = price * (1 + take_profit_pct / 100)
             else:
                 stop = price * (1 - stop_loss_pct / 100)
-                target = price * (1 - cfg.TAKE_PROFIT_PCT / 100)
+                target = price * (1 - take_profit_pct / 100)
 
             # Create position
             position = Position(
@@ -3068,6 +3619,18 @@ class TradingBot:
                 is_trade_cycle = (self.cycle % cfg.TRADE_CYCLE_INTERVAL == 0)
 
                 self.logger.info(f"--- Cycle {self.cycle} {'[TRADE]' if is_trade_cycle else '[RISK]'} ---")
+
+                # 0. Universe scan (every 30 min)
+                if self.universe_scanner and self.universe_scanner.should_scan():
+                    try:
+                        spot, futures = self.universe_scanner.scan()
+                        self._dynamic_spot_symbols = spot
+                        self._dynamic_futures_symbols = futures
+                        self.logger.info(
+                            f"Universe scan: {len(spot)} spot + {len(futures)} futures symbols"
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"Universe scan failed: {e}")
 
                 # 1. Fetch prices
                 self.fetch_prices()

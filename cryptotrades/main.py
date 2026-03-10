@@ -47,7 +47,10 @@ if __name__ == "__main__":
         sys.exit(0)
     os.environ["BOT_LOCK_SKIP"] = "1"
     from dotenv import load_dotenv
-    load_dotenv()
+    # Load .env from same directory as this file (cryptotrades/.env)
+    # C:\Bot\.env is a directory, not a file, so default load_dotenv() is a no-op
+    _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    load_dotenv(_env_path, override=False)
     try:
         from core.trading_engine import main
         main()

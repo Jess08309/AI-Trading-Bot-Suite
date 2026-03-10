@@ -1,0 +1,95 @@
+{
+  "timestamp": "2026-03-08T19:20:31.865881+00:00",
+  "days": 365,
+  "filters": {
+    "min_days": 180,
+    "min_return_pct": 0.0,
+    "min_sharpe": 0.1,
+    "max_drawdown_pct": -70.0
+  },
+  "results": {
+    "spot": {
+      "PEPE-USD": {
+        "data_points": 365,
+        "total_return_pct": -45.733788395904426,
+        "max_drawdown_pct": -79.51030927835052,
+        "sharpe": 0.02798307558382187,
+        "annualized_volatility_pct": 115.06675166092523,
+        "avg_daily_volume": 1892963606204.9753
+      },
+      "SUI-USD": {
+        "data_points": 365,
+        "total_return_pct": -61.04849279161206,
+        "max_drawdown_pct": -80.12664956435323,
+        "sharpe": -0.45048166070838963,
+        "annualized_volatility_pct": 99.96931217247189,
+        "avg_daily_volume": 20670033.008767124
+      },
+      "APT-USD": {
+        "data_points": 365,
+        "total_return_pct": -83.25490196078431,
+        "max_drawdown_pct": -86.75693311582381,
+        "sharpe": -1.5772681307014287,
+        "annualized_volatility_pct": 88.4468281186019,
+        "avg_daily_volume": 819262.6319150685
+      },
+      "SHIB-USD": {
+        "data_points": 365,
+        "total_return_pct": -54.16309012875538,
+        "max_drawdown_pct": -68.77562975981255,
+        "sharpe": -0.6878883800813558,
+        "annualized_volatility_pct": 73.87353670203761,
+        "avg_daily_volume": 415227769464.1562
+      },
+      "HBAR-USD": {
+        "data_points": 365,
+        "total_return_pct": -52.33747993579455,
+        "max_drawdown_pct": -73.25358195653664,
+        "sharpe": -0.4562091548888981,
+        "annualized_volatility_pct": 84.95890209293434,
+        "avg_daily_volume": 164248160.63835618
+      },
+      "ICP-USD": {
+        "data_points": 365,
+        "total_return_pct": -54.82383324109943,
+        "max_drawdown_pct": -76.70422849492357,
+        "sharpe": -0.23841610303037591,
+        "annualized_volatility_pct": 105.96056223975417,
+        "avg_daily_volume": 1636722.953599452
+      },
+      "FIL-USD": {
+        "data_points": 365,
+        "total_return_pct": -66.04450825556354,
+        "max_drawdown_pct": -73.8548483045806,
+        "sharpe": -0.37908295177610307,
+        "annualized_volatility_pct": 120.88447611600708,
+        "avg_daily_volume": 1875625.9470465754
+      },
+      "RENDER-USD": {
+        "data_points": 365,
+        "total_return_pct": -53.96301188903567,
+        "max_drawdown_pct": -77.8814489571899,
+        "sharpe": -0.2012702987633544,
+        "annualized_volatility_pct": 106.1450433779158,
+        "avg_daily_volume": 1384473.7348219177
+      },
+      "FET-USD": {
+        "data_points": 365,
+        "total_return_pct": -72.85281876655316,
+        "max_drawdown_pct": -84.32852143482064,
+        "sharpe": -0.5578221323310244,
+        "annualized_volatility_pct": 117.34230969916288,
+        "avg_daily_volume": 13698007.36328767
+      },
+      "STX-USD": {
+        "data_points": 365,
+        "total_return_pct": -58.991650610147715,
+        "max_drawdown_pct": -77.33626962849482,
+        "sharpe": -0.4876511523131581,
+        "annualized_volatility_pct": 93.24430015952076,
+        "avg_daily_volume": 3226240.263369863
+      }
+    },
+    "futures": {}
+  }
+}

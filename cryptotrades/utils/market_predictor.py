@@ -8,7 +8,10 @@ import os
 import numpy as np
 from typing import Dict, Optional, Tuple, List
 from datetime import datetime
-from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.ensemble import (
+    GradientBoostingClassifier, RandomForestClassifier,
+    ExtraTreesClassifier, VotingClassifier,
+)
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score, classification_report
 from joblib import dump, load
@@ -160,17 +163,39 @@ class MarketPredictor:
             X_train, X_test = X[train_idx], X[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
 
-            model = GradientBoostingClassifier(
-                n_estimators=200,
-                max_depth=5,
-                learning_rate=0.05,
-                subsample=0.8,
-                min_samples_split=20,
-                min_samples_leaf=10,
-                random_state=42
-            )
-            model.fit(X_train, y_train)
-            score = model.score(X_test, y_test)
+            try:
+                gbm = GradientBoostingClassifier(
+                    n_estimators=200, max_depth=5, learning_rate=0.05,
+                    subsample=0.8, min_samples_split=20, min_samples_leaf=10,
+                    random_state=42,
+                )
+                rf = RandomForestClassifier(
+                    n_estimators=150, max_depth=6, min_samples_leaf=5,
+                    random_state=42, n_jobs=-1,
+                )
+                et = ExtraTreesClassifier(
+                    n_estimators=150, max_depth=6, min_samples_leaf=5,
+                    random_state=42, n_jobs=-1,
+                )
+                model = VotingClassifier(
+                    estimators=[('gbm', gbm), ('rf', rf), ('et', et)],
+                    voting='soft',
+                )
+                model.fit(X_train, y_train)
+                score = model.score(X_test, y_test)
+                # Log individual model accuracies
+                for name, est in model.named_estimators_.items():
+                    ind_score = est.score(X_test, y_test)
+                    log_fn(f"[ML]   Fold {fold} {name}: {ind_score:.1%}")
+            except Exception as e:
+                log_fn(f"[ML] VotingClassifier failed ({e}), falling back to single GBM")
+                model = GradientBoostingClassifier(
+                    n_estimators=200, max_depth=5, learning_rate=0.05,
+                    subsample=0.8, min_samples_split=20, min_samples_leaf=10,
+                    random_state=42,
+                )
+                model.fit(X_train, y_train)
+                score = model.score(X_test, y_test)
             cv_scores.append(score)
 
             if score > best_score:
@@ -188,8 +213,13 @@ class MarketPredictor:
         self.train_accuracy = float(np.mean(cv_scores))
         self.test_accuracy = best_score
 
-        # Feature importances
-        importances = self.model.feature_importances_
+        # Feature importances (average across ensemble members if VotingClassifier)
+        if hasattr(self.model, 'estimators_'):
+            importances = np.mean([
+                est.feature_importances_ for est in self.model.estimators_
+            ], axis=0)
+        else:
+            importances = self.model.feature_importances_
         self.feature_importances = {
             name: float(imp) for name, imp in
             sorted(zip(FEATURE_NAMES, importances), key=lambda x: -x[1])
