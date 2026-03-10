@@ -1,7 +1,7 @@
 """
-Unified Tri-Bot Dashboard
-Shows CryptoBot + AlpacaBot + PutSeller in a single web UI.
-Reads state files from all three bots and streams updates via polling.
+Unified Quad-Bot Dashboard
+Shows CryptoBot + AlpacaBot + IronCondor + CallBuyer in a single web UI.
+Reads state files from all four bots and streams updates via polling.
 
 Run:  python tools/dashboard/unified_dashboard.py
 Open:  http://127.0.0.1:8088
@@ -430,6 +430,8 @@ def _putseller_payload() -> Dict[str, Any]:
     total_credit = 0.0
     total_risk = 0.0
     total_unrealized = 0.0
+    put_count = 0
+    call_count = 0
     if isinstance(positions, dict):
         for pos_id, pos in positions.items():
             if not isinstance(pos, dict):
@@ -438,9 +440,14 @@ def _putseller_payload() -> Dict[str, Any]:
             max_loss = _safe_float(pos.get("max_loss_total", 0))
             pnl = _safe_float(pos.get("current_pnl_total", 0))
             pnl_pct = _safe_float(pos.get("current_pnl_pct", 0))
+            spread_type = pos.get("spread_type", "put")
             total_credit += credit
             total_risk += max_loss
             total_unrealized += pnl
+            if spread_type == "call":
+                call_count += 1
+            else:
+                put_count += 1
 
             open_pos.append({
                 "pos_id": pos_id,
@@ -460,9 +467,10 @@ def _putseller_payload() -> Dict[str, Any]:
                 "short_delta": pos.get("short_delta"),
                 "iv_premium": pos.get("iv_premium"),
                 "open_date": pos.get("open_date", ""),
+                "spread_type": spread_type,
             })
 
-    # Log entries with PutSeller-specific keywords
+    # Log entries with IronCondor-specific keywords
     log_path = _latest_log(PUTSELLER_LOGS, "putseller_")
     ps_keywords = (
         "FOUND", "OPENING", "OPENED", "CLOSING", "CLOSED", "TAKE_PROFIT",
@@ -477,7 +485,7 @@ def _putseller_payload() -> Dict[str, Any]:
     process = _get_process_info("PutSeller\\.venv")
 
     return {
-        "name": "PutSeller",
+        "name": "IronCondor",
         "appendage": "Right Leg",
         "status": "RUNNING" if process else "STOPPED",
         "pid": process["pid"] if process else None,
@@ -492,6 +500,8 @@ def _putseller_payload() -> Dict[str, Any]:
         "total_credit": total_credit,
         "total_risk": total_risk,
         "total_unrealized": total_unrealized,
+        "put_count": put_count,
+        "call_count": call_count,
         "consecutive_losses": consec_losses,
         "total_trades": total_trades,
         "wins": wins,
@@ -608,6 +618,7 @@ def api_alpaca():
 
 
 @app.get("/api/putseller")
+@app.get("/api/ironcondor")
 def api_putseller():
     return jsonify(_putseller_payload())
 
@@ -761,7 +772,7 @@ tr:hover td { background: #151d28; }
 }
 .filter-bar button.active { border-color: var(--green); color: var(--green); }
 
-/* PutSeller spread progress bar */
+/* IronCondor spread progress bar */
 .spread-bar { display: flex; align-items: center; gap: 4px; }
 .spread-bar .bar { flex: 1; height: 6px; background: #1e2a3a; border-radius: 3px; overflow: hidden; }
 .spread-bar .fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
@@ -898,7 +909,7 @@ tr:hover td { background: #151d28; }
   <!-- PutSeller Column -->
   <div class="bot-col" id="putsellerCol">
     <div class="bot-label">
-      &#129470; PutSeller <span class="appendage">Right Leg</span>
+      &#129470; IronCondor <span class="appendage">Right Leg</span>
       <span class="tag" id="putsellerStatus">&mdash;</span>
       <span class="tag pid" id="putsellerPid"></span>
     </div>
@@ -906,7 +917,7 @@ tr:hover td { background: #151d28; }
     <div class="section">
       <div class="section-head">Open Spreads <span id="putsellerPosCount"></span></div>
       <div class="section-body"><table id="putsellerPosTable"><thead><tr>
-        <th>Symbol</th><th>Spread</th><th>Exp</th><th>Qty</th><th>Credit</th><th>P&amp;L</th><th>ROC/yr</th>
+        <th>Symbol</th><th>Type</th><th>Spread</th><th>Exp</th><th>Qty</th><th>Credit</th><th>P&amp;L</th><th>ROC/yr</th>
       </tr></thead><tbody></tbody></table></div>
     </div>
     <div class="section">
@@ -1062,7 +1073,7 @@ function renderSummary(c, a, p, cb) {
     null,
     ['Crypto', fmtUsd(cryptoTotal), pnlCls(cryptoPnl)],
     ['Alpaca', fmtUsd(alpacaTotal), pnlCls(alpacaPnl)],
-    ['PutSeller', `${p.position_count || 0} spreads`, 'neutral'],
+    ['IronCondor', `P:${p.put_count||0} C:${p.call_count||0}`, 'neutral'],
     ['CallBuyer', `${cb.position_count || 0} calls`, 'neutral'],
     null,
     ['Combined', fmtUsd(grandTotal), pnlCls(grandPnl)],
@@ -1192,7 +1203,7 @@ function renderPutSeller(p) {
   const b = p.balances;
   renderCards('putsellerCards', [
     ['Allocation', fmtUsd(b.total), 'neutral', `Peak: ${fmtUsd(b.peak)}`],
-    ['Credit', fmtUsd(p.total_credit), 'good', `${p.position_count} spreads`],
+    ['Credit', fmtUsd(p.total_credit), 'good', `P:${p.put_count||0} C:${p.call_count||0}`],
     ['Risk', fmtUsd(p.total_risk), 'neutral'],
     ['Unrealized', fmtUsd(p.total_unrealized), pnlCls(p.total_unrealized)],
     ['Daily P&L', fmtUsd(b.daily_pnl), pnlCls(b.daily_pnl)],
@@ -1201,22 +1212,26 @@ function renderPutSeller(p) {
   ]);
 
   // Spread positions table
-  $('#putsellerPosCount').textContent = `(${p.positions.length}/8)`;
+  $('#putsellerPosCount').textContent = `(P:${p.put_count||0} C:${p.call_count||0})`;
   const ptbody = document.querySelector('#putsellerPosTable tbody');
   ptbody.innerHTML = p.positions.map(pos => {
     const pnlVal = pos.current_pnl || 0;
     const pnlPct = pos.current_pnl_pct || 0;
     const rocStr = pos.roc_annual ? `${(pos.roc_annual * 100).toFixed(0)}%` : '-';
+    const isCall = pos.spread_type === 'call';
+    const typeBadge = isCall ? '<span class="pill call">CALL</span>' : '<span class="pill put">PUT</span>';
+    const strikeSuffix = isCall ? 'C' : 'P';
     return `<tr>
       <td><strong>${esc(pos.underlying)}</strong></td>
-      <td style="font-size:10px">$${fmt(pos.short_strike,0)}/$${fmt(pos.long_strike,0)}P</td>
+      <td>${typeBadge}</td>
+      <td style="font-size:10px">$${fmt(pos.short_strike,0)}/$${fmt(pos.long_strike,0)}${strikeSuffix}</td>
       <td style="font-size:10px">${esc(pos.expiration)}</td>
       <td>${pos.qty}</td>
       <td class="good">$${fmt(pos.total_credit,0)}</td>
       <td class="${pnlCls(pnlVal)}">$${fmt(pnlVal,0)} <span style="font-size:9px">(${pnlPct>=0?'+':''}${fmt(pnlPct,0)}%)</span></td>
       <td style="color:var(--cyan)">${rocStr}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="7" style="color:var(--muted)">No spreads open</td></tr>';
+  }).join('') || '<tr><td colspan="8" style="color:var(--muted)">No spreads open</td></tr>';
 
   renderLog('putsellerLog', p.log_entries, 'putseller');
 
@@ -1343,9 +1358,10 @@ function renderRiskMap(p) {
       const pnlPct = pos.current_pnl_pct || 0;
       const fillClass = pnlPct >= 0 ? 'profit' : 'loss';
       const fillWidth = Math.min(100, Math.abs(pnlPct));
+      const riskSuffix = pos.spread_type === 'call' ? 'C' : 'P';
       return `<div style="margin-bottom:6px;">
         <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:2px;">
-          <span><strong>${pos.underlying}</strong> $${fmt(pos.short_strike,0)}/$${fmt(pos.long_strike,0)}P</span>
+          <span><strong>${pos.underlying}</strong> $${fmt(pos.short_strike,0)}/$${fmt(pos.long_strike,0)}${riskSuffix}</span>
           <span class="${pnlCls(pos.current_pnl)}">${pnlPct>=0?'+':''}${fmt(pnlPct,0)}%</span>
         </div>
         <div class="spread-bar">
@@ -1357,7 +1373,7 @@ function renderRiskMap(p) {
     <div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border);font-size:10px;display:grid;grid-template-columns:1fr 1fr;gap:4px;">
       <div><span style="color:var(--muted)">Total Credit:</span> <span class="good">${fmtUsd(p.total_credit)}</span></div>
       <div><span style="color:var(--muted)">Max Risk:</span> <span>${fmtUsd(p.total_risk)}</span></div>
-      <div><span style="color:var(--muted)">Positions:</span> ${p.position_count}/8</div>
+      <div><span style="color:var(--muted)">Positions:</span> P:${p.put_count||0} C:${p.call_count||0}</div>
       <div><span style="color:var(--muted)">Unrealized:</span> <span class="${pnlCls(p.total_unrealized)}">${fmtUsd(p.total_unrealized)}</span></div>
     </div>
   `;
@@ -1454,7 +1470,7 @@ async function fetchAll() {
     renderPutSeller(data.putseller);
     renderCallBuyer(data.callbuyer);
     $('#lastUpdate').textContent = new Date().toLocaleTimeString();
-    $('#footer').textContent = `Last update: ${new Date().toLocaleString()} \u00b7 CryptoBot ${data.crypto.status} \u00b7 AlpacaBot ${data.alpaca.status} \u00b7 PutSeller ${data.putseller.status} \u00b7 CallBuyer ${data.callbuyer.status}`;
+    $('#footer').textContent = `Last update: ${new Date().toLocaleString()} \u00b7 CryptoBot ${data.crypto.status} \u00b7 AlpacaBot ${data.alpaca.status} \u00b7 IronCondor ${data.putseller.status} \u00b7 CallBuyer ${data.callbuyer.status}`;
   } catch (e) {
     $('#footer').textContent = 'Fetch error: ' + e.message;
   }
@@ -1475,5 +1491,5 @@ fetchAll();
 if __name__ == "__main__":
     host = os.getenv("DASH_HOST", "127.0.0.1")
     port = int(os.getenv("DASH_PORT", "8088"))
-    print(f"\n  Trading Command Center (4-Bot) -> http://{host}:{port}\n")
+    print(f"\n  Trading Command Center (Quad-Bot) -> http://{host}:{port}\n")
     app.run(host=host, port=port, debug=False)
