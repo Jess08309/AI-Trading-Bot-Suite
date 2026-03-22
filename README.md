@@ -104,7 +104,7 @@ Every component — ML pipelines, reinforcement learning agents, circuit breaker
 
 ```bash
 # Clone the repo
-git clone https://github.com/Jess08309/CryptoBot-Updated-20260321.git
+git clone <your-repo-url>
 cd CryptoBot-Updated-20260321
 
 # Create virtual environment
