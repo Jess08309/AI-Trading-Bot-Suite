@@ -451,7 +451,7 @@ def get_pair_sentiment(pair: str, coin_sentiments: Dict[str, float],
     Falls back to global sentiment if no coin-specific data.
 
     Args:
-        pair: Trading pair like "BTC-USD" or "PI_XBTUSD"
+        pair: Trading pair like "BTC/USD" or "PI_XBTUSD"
         coin_sentiments: Per-coin sentiment dict from get_coin_sentiment()
         global_sentiment: Overall market sentiment
 
@@ -470,7 +470,7 @@ def get_pair_sentiment(pair: str, coin_sentiments: Dict[str, float],
         "PI_UNIUSD": "UNI", "PI_ATOMUSD": "ATOM", "PI_XLMUSD": "XLM",
     }
 
-    coin = futures_map.get(pair_upper, pair_upper.split("-")[0])
+    coin = futures_map.get(pair_upper, pair_upper.split("/")[0])
 
     if coin in coin_sentiments:
         # Blend coin-specific (70%) with global (30%)

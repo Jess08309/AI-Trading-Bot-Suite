@@ -258,8 +258,8 @@ _ADJUSTMENTS: Dict[str, Dict[str, Dict[str, float]]] = {
         },
         "CallBuyer": {
             "position_size": 1.20, "stop_loss_width": 1.0,
-            "take_profit_width": 1.30, "trade_frequency": 1.20,
-            "confidence_offset": -0.05,  # lower threshold = more aggressive
+            "take_profit_width": 1.20, "trade_frequency": 1.15,
+            "confidence_offset": -0.05,  # lower threshold in uptrend
         },
     },
     TRENDING_DOWN: {
@@ -280,9 +280,10 @@ _ADJUSTMENTS: Dict[str, Dict[str, Dict[str, float]]] = {
             "credit_threshold": 1.30,
         },
         "CallBuyer": {
-            "position_size": 0.50, "stop_loss_width": 0.80,
-            "take_profit_width": 0.70, "trade_frequency": 0.40,
-            "confidence_offset": 0.15,  # raise threshold = very selective
+            "position_size": 0.0,  # HALT — don't buy calls in downtrend
+            "stop_loss_width": 0.80,
+            "take_profit_width": 0.80, "trade_frequency": 0.0,
+            "confidence_offset": 0.15,  # much higher bar if somehow enabled
         },
     },
     RANGING: {
@@ -304,9 +305,9 @@ _ADJUSTMENTS: Dict[str, Dict[str, Dict[str, float]]] = {
             "credit_threshold": 0.85,  # lower threshold — ideal for selling premium
         },
         "CallBuyer": {
-            "position_size": 0.70, "stop_loss_width": 0.85,
-            "take_profit_width": 0.75, "trade_frequency": 0.60,
-            "confidence_offset": 0.05,  # slightly raised threshold
+            "position_size": 0.70, "stop_loss_width": 0.90,
+            "take_profit_width": 0.90, "trade_frequency": 0.70,
+            "confidence_offset": 0.05,  # slightly higher bar — no momentum
         },
     },
     HIGH_VOLATILITY: {
@@ -329,9 +330,11 @@ _ADJUSTMENTS: Dict[str, Dict[str, Dict[str, float]]] = {
             "credit_threshold": 2.0,
         },
         "CallBuyer": {
-            "position_size": 0.40, "stop_loss_width": 1.50,
-            "take_profit_width": 1.60, "trade_frequency": 0.30,
-            "confidence_offset": 0.10,  # raised threshold = very selective
+            "position_size": 0.0,  # HALT — too volatile for directional calls
+            "stop_loss_width": 0.60,
+            "take_profit_width": 0.60,
+            "trade_frequency": 0.0,
+            "confidence_offset": 0.20,  # very high bar if somehow enabled
         },
     },
 }

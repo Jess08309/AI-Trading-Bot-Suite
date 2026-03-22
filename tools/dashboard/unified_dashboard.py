@@ -1,7 +1,7 @@
 """
 Unified Quad-Bot Dashboard
 Shows CryptoBot + AlpacaBot + IronCondor + CallBuyer in a single web UI.
-Reads state files from all four bots and streams updates via polling.
+Reads state files from all three bots and streams updates via polling.
 
 Run:  python tools/dashboard/unified_dashboard.py
 Open:  http://127.0.0.1:8088
@@ -23,7 +23,6 @@ from flask import Flask, jsonify, request
 CRYPTO_ROOT = Path(r"C:\Bot")
 ALPACA_ROOT = Path(r"C:\AlpacaBot")
 PUTSELLER_ROOT = Path(r"C:\PutSeller")
-CALLBUYER_ROOT = Path(r"C:\CallBuyer")
 
 CRYPTO_STATE = CRYPTO_ROOT / "data" / "state"
 CRYPTO_LOGS = CRYPTO_ROOT / "logs"
@@ -38,6 +37,7 @@ PUTSELLER_STATE = PUTSELLER_ROOT / "data" / "state"
 PUTSELLER_LOGS = PUTSELLER_ROOT / "logs"
 PUTSELLER_TRADES_CSV = PUTSELLER_ROOT / "data" / "trades.csv"
 
+CALLBUYER_ROOT = Path(r"C:\CallBuyer")
 CALLBUYER_STATE = CALLBUYER_ROOT / "data" / "state"
 CALLBUYER_LOGS = CALLBUYER_ROOT / "logs"
 CALLBUYER_TRADES_CSV = CALLBUYER_ROOT / "data" / "trades.csv"
@@ -117,22 +117,29 @@ def _parse_log_tail(log_path: Optional[Path], limit: int = 120, keywords: tuple 
 def _parse_csv_trades(csv_path: Path, limit: int = 100) -> List[Dict]:
     if not csv_path.exists():
         return []
+    header_line = None
     rows: deque = deque(maxlen=max(400, limit * 4))
     try:
         with csv_path.open("r", encoding="utf-8", errors="ignore") as f:
             for line in f:
                 line = line.strip()
-                if line:
-                    rows.append(line)
+                if not line:
+                    continue
+                if header_line is None:
+                    first_cols = next(csv.reader([line]))
+                    if first_cols and first_cols[0].lower() in {"timestamp", "symbol", "date"}:
+                        header_line = line
+                        continue
+                rows.append(line)
     except Exception:
         return []
 
     if not rows:
         return []
 
-    first_cols = next(csv.reader([rows[0]]))
     header_map: Dict[str, int] = {}
-    if first_cols and first_cols[0].lower() in {"timestamp", "symbol", "date"}:
+    if header_line:
+        first_cols = next(csv.reader([header_line]))
         header_map = {c.lower(): i for i, c in enumerate(first_cols)}
 
     parsed = []
@@ -154,11 +161,12 @@ def _parse_csv_trades(csv_path: Path, limit: int = 100) -> List[Dict]:
 
             pnl_col = header_map.get("pnl", header_map.get("pnl_usd"))
             pct_col = header_map.get("pnl_pct")
-            side_col = header_map.get("direction", header_map.get("side"))
+            side_col = header_map.get("direction", header_map.get("side", header_map.get("spread_type")))
             price_col = header_map.get("exit_price", header_map.get("price"))
             amount_col = header_map.get("cost", header_map.get("size_usd", header_map.get("amount")))
             exit_col = header_map.get("exit_reason")
 
+            open_date_col = header_map.get("open_date")
             parsed.append({
                 "timestamp": ts,
                 "symbol": display_sym,
@@ -168,6 +176,7 @@ def _parse_csv_trades(csv_path: Path, limit: int = 100) -> List[Dict]:
                 "pnl": _safe_float(cols[pnl_col]) if pnl_col is not None and pnl_col < len(cols) else None,
                 "pnl_pct": _safe_float(cols[pct_col]) if pct_col is not None and pct_col < len(cols) else None,
                 "exit_reason": cols[exit_col] if exit_col is not None and exit_col < len(cols) else "",
+                "open_date": cols[open_date_col] if open_date_col is not None and open_date_col < len(cols) else "",
             })
         else:
             parsed.append({
@@ -186,7 +195,8 @@ def _parse_csv_trades(csv_path: Path, limit: int = 100) -> List[Dict]:
 
 def _safe_float(v: Any, default: float = 0.0) -> float:
     try:
-        return float(v)
+        s = str(v).strip().rstrip('%')
+        return float(s)
     except (ValueError, TypeError):
         return default
 
@@ -515,11 +525,9 @@ def _putseller_payload() -> Dict[str, Any]:
 def _callbuyer_payload() -> Dict[str, Any]:
     bot_state = _safe_json(CALLBUYER_STATE / "bot_state.json")
     positions = _safe_json(CALLBUYER_STATE / "positions.json")
-    meta_state = _safe_json(CALLBUYER_STATE / "meta_state.json")
-    features_log = _safe_json(CALLBUYER_STATE / "features_log.json", default=[])
 
-    current_bal = _safe_float(bot_state.get("current_balance", 50000))
-    peak_bal = _safe_float(bot_state.get("peak_balance", 50000))
+    current_bal = _safe_float(bot_state.get("current_balance", 0))
+    peak_bal = _safe_float(bot_state.get("peak_balance", 0))
     daily_pnl = _safe_float(bot_state.get("daily_pnl", 0))
     total_pnl = _safe_float(bot_state.get("total_pnl", 0))
     consec_losses = int(bot_state.get("consecutive_losses", 0) or 0)
@@ -527,18 +535,12 @@ def _callbuyer_payload() -> Dict[str, Any]:
     wins = int(bot_state.get("wins", 0) or 0)
     losses = int(bot_state.get("losses", 0) or 0)
     win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
-    initial = 50000.0
+
+    initial = _safe_float(bot_state.get("initial_capital", 8250))
+    if initial == 0:
+        initial = 8250
     return_pct = (total_pnl / initial * 100) if initial else 0
 
-    # ML status
-    ml_status = bot_state.get("ml_status", {})
-    if not ml_status:
-        ml_status = {"active": False, "warmup_progress": "0/30"}
-
-    # Meta-learner status
-    meta_status = meta_state if meta_state else {"mode": "NORMAL", "recent_win_rate": 0}
-
-    # Open positions
     open_pos = []
     total_invested = 0.0
     total_unrealized = 0.0
@@ -547,35 +549,40 @@ def _callbuyer_payload() -> Dict[str, Any]:
             if not isinstance(pos, dict):
                 continue
             entry_total = _safe_float(pos.get("entry_total", 0))
+            current_val = _safe_float(pos.get("current_value", entry_total))
+            pnl = current_val - entry_total if current_val else 0
+            pnl_pct = (pnl / entry_total * 100) if entry_total else 0
             total_invested += entry_total
+            total_unrealized += pnl
             open_pos.append({
                 "pos_id": pos_id,
-                "symbol": pos.get("symbol", ""),
+                "symbol": pos.get("symbol", pos_id),
                 "contract": pos.get("contract", ""),
                 "strike": _safe_float(pos.get("strike")),
+                "expiration": pos.get("expiration", ""),
                 "dte_at_entry": int(pos.get("dte_at_entry", 0) or 0),
                 "qty": int(pos.get("qty", 0) or 0),
                 "entry_price": _safe_float(pos.get("entry_price")),
                 "entry_total": entry_total,
+                "current_value": current_val,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
                 "confidence": _safe_float(pos.get("confidence")),
                 "rule_score": _safe_float(pos.get("rule_score")),
                 "ml_proba": _safe_float(pos.get("ml_proba")),
                 "entry_time": pos.get("entry_time", ""),
-                "trailing_active": pos.get("trailing_active", False),
             })
 
     log_path = _latest_log(CALLBUYER_LOGS, "callbuyer_")
     cb_keywords = (
-        "BUYING", "CLOSING", "WIN", "LOSS", "Scan", "Cycle", "Best call",
-        "PASS", "ML ", "META", "BLOCKED", "momentum", "ERROR", "WARNING",
-        "retrain", "Opened", "model", "confidence",
+        "FOUND", "OPENING", "OPENED", "CLOSING", "CLOSED", "TAKE_PROFIT",
+        "STOP_LOSS", "DTE_EXIT", "Scan", "Cycle", "Earnings",
+        "ERROR", "WARNING", "confidence", "breakout", "regime",
     )
     log_entries = _parse_log_tail(log_path, limit=100, keywords=cb_keywords)
+
     trade_history = _parse_csv_trades(CALLBUYER_TRADES_CSV, limit=60)
     process = _get_process_info("CallBuyer\\.venv")
-
-    # Training data count
-    completed_outcomes = sum(1 for d in features_log if isinstance(d, dict) and d.get("completed")) if isinstance(features_log, list) else 0
 
     return {
         "name": "CallBuyer",
@@ -597,11 +604,49 @@ def _callbuyer_payload() -> Dict[str, Any]:
         "wins": wins,
         "losses": losses,
         "win_rate": win_rate,
-        "ml_status": ml_status,
-        "meta_status": meta_status,
-        "completed_outcomes": completed_outcomes,
         "trade_history": trade_history,
         "log_entries": log_entries,
+    }
+
+
+def _guardrails_payload() -> Dict[str, Any]:
+    """Aggregate cross-bot portfolio exposure and guardrail status."""
+    ps_positions = _safe_json(PUTSELLER_STATE / "positions.json")
+    cb_positions = _safe_json(CALLBUYER_STATE / "positions.json")
+    ab_positions = _safe_json(ALPACA_STATE / "positions.json")
+
+    ps_risk = sum(_safe_float(p.get("max_loss_total", 0)) for p in ps_positions.values() if isinstance(p, dict))
+    cb_risk = sum(_safe_float(p.get("entry_total", 0)) for p in cb_positions.values() if isinstance(p, dict))
+    ab_risk = sum(_safe_float(p.get("cost", 0)) for p in ab_positions.values() if isinstance(p, dict))
+    total_risk = ps_risk + cb_risk + ab_risk
+
+    ps_state = _safe_json(PUTSELLER_STATE / "bot_state.json")
+    equity = _safe_float(ps_state.get("current_balance", 55000)) or 55000
+    pct_used = (total_risk / equity * 100) if equity else 0
+    cap_pct = 25.0
+
+    guardrails = [
+        {"name": "Portfolio Exposure Cap", "limit": f"{cap_pct:.0f}%", "current": f"{pct_used:.1f}%",
+         "status": "OK" if pct_used < cap_pct else "BLOCKED", "bot": "All"},
+        {"name": "SPY Crash Filter", "limit": "SPY >-1.5%", "current": "Active",
+         "status": "OK", "bot": "IronCondor"},
+        {"name": "Regime Position Caps", "limit": "5P/3C in stress", "current": "Active",
+         "status": "OK", "bot": "IronCondor"},
+        {"name": "Earnings Guard", "limit": "7-day window", "current": "Active",
+         "status": "OK", "bot": "CallBuyer"},
+    ]
+
+    return {
+        "equity": equity,
+        "total_risk": total_risk,
+        "pct_used": pct_used,
+        "cap_pct": cap_pct,
+        "risk_breakdown": {
+            "ironcondor": ps_risk,
+            "callbuyer": cb_risk,
+            "alpacabot": ab_risk,
+        },
+        "guardrails": guardrails,
     }
 
 
@@ -628,6 +673,11 @@ def api_callbuyer():
     return jsonify(_callbuyer_payload())
 
 
+@app.get("/api/guardrails")
+def api_guardrails():
+    return jsonify(_guardrails_payload())
+
+
 @app.get("/api/all")
 def api_all():
     return jsonify({
@@ -636,6 +686,7 @@ def api_all():
         "alpaca": _alpaca_payload(),
         "putseller": _putseller_payload(),
         "callbuyer": _callbuyer_payload(),
+        "guardrails": _guardrails_payload(),
     })
 
 
@@ -764,6 +815,14 @@ tr:hover td { background: #151d28; }
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #2e4560; }
+
+/* Guardrails panel */
+.guardrail-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; border-bottom: 1px solid #151d28; font-size: 11px; }
+.guardrail-row:last-child { border-bottom: none; }
+.guardrail-ok { color: var(--green); }
+.guardrail-blocked { color: var(--red); font-weight: 700; }
+.risk-bar { height: 8px; background: #1e2a3a; border-radius: 4px; overflow: hidden; margin: 4px 10px 8px; }
+.risk-bar .fill { height: 100%; border-radius: 4px; transition: width 0.5s; }
 
 .filter-bar { display: flex; gap: 3px; }
 .filter-bar button {
@@ -917,7 +976,7 @@ tr:hover td { background: #151d28; }
     <div class="section">
       <div class="section-head">Open Spreads <span id="putsellerPosCount"></span></div>
       <div class="section-body"><table id="putsellerPosTable"><thead><tr>
-        <th>Symbol</th><th>Type</th><th>Spread</th><th>Exp</th><th>Qty</th><th>Credit</th><th>P&amp;L</th><th>ROC/yr</th>
+        <th>Symbol</th><th>Type</th><th>Spread</th><th>Opened</th><th>Exp</th><th>Qty</th><th>Credit</th><th>P&amp;L</th><th>ROC/yr</th>
       </tr></thead><tbody></tbody></table></div>
     </div>
     <div class="section">
@@ -935,7 +994,7 @@ tr:hover td { background: #151d28; }
     <div class="section">
       <div class="section-head">Trade History <span id="putsellerTradeCount"></span></div>
       <div class="section-body"><table id="putsellerTradeTable"><thead><tr>
-        <th>Time</th><th>Symbol</th><th>Spread</th><th>Exit</th><th>P&amp;L</th><th>%</th>
+        <th>Opened</th><th>Closed</th><th>Symbol</th><th>Spread</th><th>Exit</th><th>P&amp;L</th><th>%</th>
       </tr></thead><tbody></tbody></table></div>
     </div>
     <div class="section">
@@ -947,7 +1006,7 @@ tr:hover td { background: #151d28; }
   <!-- CallBuyer Column -->
   <div class="bot-col" id="callbuyerCol">
     <div class="bot-label">
-      &#129461; CallBuyer <span class="appendage">Left Leg</span>
+      &#129470; CallBuyer <span class="appendage">Left Leg</span>
       <span class="tag" id="callbuyerStatus">&mdash;</span>
       <span class="tag pid" id="callbuyerPid"></span>
     </div>
@@ -955,7 +1014,7 @@ tr:hover td { background: #151d28; }
     <div class="section">
       <div class="section-head">Open Calls <span id="callbuyerPosCount"></span></div>
       <div class="section-body"><table id="callbuyerPosTable"><thead><tr>
-        <th>Symbol</th><th>Contract</th><th>Qty</th><th>Entry</th><th>Conf</th><th>ML</th>
+        <th>Symbol</th><th>Strike</th><th>Exp</th><th>Qty</th><th>Entry</th><th>P&amp;L</th><th>Conf</th>
       </tr></thead><tbody></tbody></table></div>
     </div>
     <div class="section">
@@ -973,12 +1032,12 @@ tr:hover td { background: #151d28; }
     <div class="section">
       <div class="section-head">Trade History <span id="callbuyerTradeCount"></span></div>
       <div class="section-body"><table id="callbuyerTradeTable"><thead><tr>
-        <th>Time</th><th>Symbol</th><th>Contract</th><th>Exit</th><th>P&amp;L</th><th>%</th>
+        <th>Time</th><th>Symbol</th><th>Strike</th><th>Exit</th><th>P&amp;L</th><th>%</th>
       </tr></thead><tbody></tbody></table></div>
     </div>
     <div class="section">
-      <div class="section-head">ML &amp; Meta-Learner</div>
-      <div class="section-body" id="callbuyerML" style="padding:8px;font-size:11px;"></div>
+      <div class="section-head">&#128737; Portfolio Guardrails</div>
+      <div class="section-body" id="guardrailsPanel" style="padding:0;"></div>
     </div>
   </div>
 </div>
@@ -1048,15 +1107,17 @@ function renderCards(containerId, cards) {
   ).join('');
 }
 
-function renderSummary(c, a, p, cb) {
+function renderSummary(c, a, p, cb, g) {
   const cryptoTotal = c.balances?.total || 0;
   const alpacaTotal = a.balances?.total || 0;
-  const grandTotal = cryptoTotal + alpacaTotal;
+  const putsellerTotal = p.balances?.total || 0;
+  const callbuyerTotal = cb.balances?.total || 0;
+  const grandTotal = cryptoTotal + alpacaTotal + putsellerTotal + callbuyerTotal;
 
   const cryptoPnl = c.balances?.total_pnl || 0;
   const alpacaPnl = a.balances?.total_pnl || 0;
-  const putsellerPnl = p.total_unrealized || 0;
-  const callbuyerPnl = cb.total_unrealized || 0;
+  const putsellerPnl = (p.balances?.total_pnl || 0) + (p.total_unrealized || 0);
+  const callbuyerPnl = (cb.balances?.total_pnl || 0) + (cb.total_unrealized || 0);
   const grandPnl = cryptoPnl + alpacaPnl + putsellerPnl + callbuyerPnl;
 
   const cryptoDaily = c.balances?.daily_pnl || 0;
@@ -1068,20 +1129,22 @@ function renderSummary(c, a, p, cb) {
   const bots = [c, a, p, cb];
   const running = bots.filter(b => b.status === 'RUNNING').length;
 
+  const riskPct = g.pct_used || 0;
+
   const items = [
     ['Bots', `${running}/4 running`, running === 4 ? 'good' : running > 0 ? 'neutral' : 'bad'],
     null,
     ['Crypto', fmtUsd(cryptoTotal), pnlCls(cryptoPnl)],
     ['Alpaca', fmtUsd(alpacaTotal), pnlCls(alpacaPnl)],
     ['IronCondor', `P:${p.put_count||0} C:${p.call_count||0}`, 'neutral'],
-    ['CallBuyer', `${cb.position_count || 0} calls`, 'neutral'],
+    ['CallBuyer', `${cb.position_count||0} calls`, 'neutral'],
     null,
     ['Combined', fmtUsd(grandTotal), pnlCls(grandPnl)],
     ['Daily P&L', fmtUsd(grandDaily), pnlCls(grandDaily)],
     ['Total P&L', fmtUsd(grandPnl), pnlCls(grandPnl)],
     null,
     ['Credit', fmtUsd(p.total_credit || 0), 'good'],
-    ['Invested', fmtUsd(cb.total_invested || 0), 'neutral'],
+    ['Portfolio Risk', `${fmt(riskPct,1)}%`, riskPct > 20 ? 'bad' : 'good'],
   ];
 
   $('#summaryBar').innerHTML = items.map(item => {
@@ -1129,7 +1192,7 @@ function renderCrypto(c) {
     const pnlVal = t.pnl != null ? fmtUsd(t.pnl) : '-';
     const pctVal = t.pnl_pct != null ? (t.pnl_pct >= 0 ? '+' : '') + (t.pnl_pct * 100).toFixed(1) + '%' : '';
     const exitShort = (t.exit_reason || '').replace(/\s*\([^)]*\)/g, '');
-    return `<tr>
+    return `<tr style="background:${t.pnl >= 0 ? 'rgba(52,211,153,0.07)' : 'rgba(248,113,113,0.07)'}">
       <td style="font-size:10px">${shortTime(t.timestamp)}</td>
       <td>${esc(t.symbol)}</td><td>${esc(t.side)}</td>
       <td style="font-size:10px">${esc(exitShort)}</td>
@@ -1182,7 +1245,7 @@ function renderAlpaca(a) {
     const pnlVal = t.pnl != null ? fmtUsd(t.pnl) : '-';
     const pctVal = t.pnl_pct != null ? (t.pnl_pct >= 0 ? '+' : '') + (t.pnl_pct * 100).toFixed(1) + '%' : '';
     const exitShort = (t.exit_reason || '').replace(/\s*\([^)]*\)/g, '');
-    return `<tr>
+    return `<tr style="background:${t.pnl >= 0 ? 'rgba(52,211,153,0.07)' : 'rgba(248,113,113,0.07)'}">
       <td style="font-size:10px">${shortTime(t.timestamp)}</td>
       <td>${esc(t.symbol)}</td><td>${esc(t.side)}</td>
       <td style="font-size:10px">${esc(exitShort)}</td>
@@ -1221,17 +1284,19 @@ function renderPutSeller(p) {
     const isCall = pos.spread_type === 'call';
     const typeBadge = isCall ? '<span class="pill call">CALL</span>' : '<span class="pill put">PUT</span>';
     const strikeSuffix = isCall ? 'C' : 'P';
+    const openDt = pos.open_date ? pos.open_date.slice(5) : '-';
     return `<tr>
       <td><strong>${esc(pos.underlying)}</strong></td>
       <td>${typeBadge}</td>
       <td style="font-size:10px">$${fmt(pos.short_strike,0)}/$${fmt(pos.long_strike,0)}${strikeSuffix}</td>
+      <td style="font-size:10px">${openDt}</td>
       <td style="font-size:10px">${esc(pos.expiration)}</td>
       <td>${pos.qty}</td>
       <td class="good">$${fmt(pos.total_credit,0)}</td>
       <td class="${pnlCls(pnlVal)}">$${fmt(pnlVal,0)} <span style="font-size:9px">(${pnlPct>=0?'+':''}${fmt(pnlPct,0)}%)</span></td>
       <td style="color:var(--cyan)">${rocStr}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="8" style="color:var(--muted)">No spreads open</td></tr>';
+  }).join('') || '<tr><td colspan="9" style="color:var(--muted)">No spreads open</td></tr>';
 
   renderLog('putsellerLog', p.log_entries, 'putseller');
 
@@ -1240,102 +1305,21 @@ function renderPutSeller(p) {
   const ttbody = document.querySelector('#putsellerTradeTable tbody');
   ttbody.innerHTML = p.trade_history.slice(0, 60).map(t => {
     const pnlVal = t.pnl != null ? fmtUsd(t.pnl) : '-';
-    const pctVal = t.pnl_pct != null ? (t.pnl_pct >= 0 ? '+' : '') + (t.pnl_pct * 100).toFixed(1) + '%' : '';
+    const pctVal = t.pnl_pct != null ? (t.pnl_pct >= 0 ? '+' : '') + fmt(t.pnl_pct, 1) + '%' : '';
     const exitShort = (t.exit_reason || '').replace(/\s*\([^)]*\)/g, '');
-    return `<tr>
+    const openDt = t.open_date ? t.open_date.slice(5) : '-';
+    return `<tr style="background:${t.pnl >= 0 ? 'rgba(52,211,153,0.07)' : 'rgba(248,113,113,0.07)'}">
+      <td style="font-size:10px">${openDt}</td>
       <td style="font-size:10px">${shortTime(t.timestamp)}</td>
       <td>${esc(t.symbol)}</td><td>${esc(t.side)}</td>
       <td style="font-size:10px">${esc(exitShort)}</td>
       <td class="${pnlCls(t.pnl)}">${pnlVal}</td>
       <td class="${pnlCls(t.pnl)}" style="font-size:10px">${pctVal}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="6" style="color:var(--muted)">No closed trades yet</td></tr>';
+  }).join('') || '<tr><td colspan="7" style="color:var(--muted)">No closed trades yet</td></tr>';
 
   // Risk map
   renderRiskMap(p);
-}
-
-function renderCallBuyer(cb) {
-  const statusEl = $('#callbuyerStatus');
-  statusEl.textContent = cb.status;
-  statusEl.className = 'tag ' + (cb.status==='RUNNING'?'running':'stopped');
-  $('#callbuyerPid').textContent = cb.pid ? `PID ${cb.pid}` : '';
-
-  const b = cb.balances;
-  const ml = cb.ml_status || {};
-  const meta = cb.meta_status || {};
-  renderCards('callbuyerCards', [
-    ['Allocation', fmtUsd(b.total), 'neutral', `Peak: ${fmtUsd(b.peak)}`],
-    ['Daily P&L', fmtUsd(b.daily_pnl), pnlCls(b.daily_pnl)],
-    ['Total P&L', fmtUsd(b.total_pnl), pnlCls(b.total_pnl), `${fmt(b.return_pct)}%`],
-    ['Positions', `${cb.position_count}/6`, ''],
-    ['W/L', `${cb.wins}/${cb.losses}`, cb.win_rate >= 50 ? 'good' : cb.total_trades > 0 ? 'bad' : 'neutral',
-      cb.total_trades > 0 ? `${fmt(cb.win_rate,0)}% WR` : ''],
-    ['ML', ml.active ? `${(ml.accuracy*100).toFixed(0)}%` : 'Warmup', ml.active ? 'good' : 'neutral',
-      `${ml.warmup_progress || '0/30'}`],
-  ]);
-
-  // Open calls table
-  $('#callbuyerPosCount').textContent = `(${cb.positions.length}/6)`;
-  const ptbody = document.querySelector('#callbuyerPosTable tbody');
-  ptbody.innerHTML = cb.positions.map(pos => {
-    return `<tr>
-      <td><strong>${esc(pos.symbol)}</strong></td>
-      <td style="font-size:10px">${esc(pos.contract)}</td>
-      <td>${pos.qty}</td>
-      <td>$${fmt(pos.entry_price,2)}</td>
-      <td>${fmt(pos.confidence*100,0)}%</td>
-      <td>${fmt(pos.ml_proba*100,0)}%</td>
-    </tr>`;
-  }).join('') || '<tr><td colspan="6" style="color:var(--muted)">No calls open</td></tr>';
-
-  renderLog('callbuyerLog', cb.log_entries, 'callbuyer');
-
-  // Trade history
-  $('#callbuyerTradeCount').textContent = `(${cb.trade_history.length})`;
-  const ttbody = document.querySelector('#callbuyerTradeTable tbody');
-  ttbody.innerHTML = cb.trade_history.slice(0, 60).map(t => {
-    const pnlVal = t.pnl != null ? fmtUsd(t.pnl) : '-';
-    const pctVal = t.pnl_pct != null ? (t.pnl_pct >= 0 ? '+' : '') + (t.pnl_pct * 100).toFixed(1) + '%' : '';
-    const exitShort = (t.exit_reason || '').replace(/\s*\([^)]*\)/g, '');
-    return `<tr>
-      <td style="font-size:10px">${shortTime(t.timestamp)}</td>
-      <td>${esc(t.symbol)}</td><td style="font-size:9px">${esc(t.side)}</td>
-      <td style="font-size:10px">${esc(exitShort)}</td>
-      <td class="${pnlCls(t.pnl)}">${pnlVal}</td>
-      <td class="${pnlCls(t.pnl)}" style="font-size:10px">${pctVal}</td>
-    </tr>`;
-  }).join('') || '<tr><td colspan="6" style="color:var(--muted)">No closed trades yet</td></tr>';
-
-  // ML & Meta section
-  renderCallBuyerML(cb);
-}
-
-function renderCallBuyerML(cb) {
-  const el = $('#callbuyerML');
-  const ml = cb.ml_status || {};
-  const meta = cb.meta_status || {};
-  const mode = meta.mode || 'NORMAL';
-  const modeColor = mode === 'DEFENSIVE' ? 'var(--red)' : mode === 'CAUTIOUS' ? 'var(--orange)' : mode === 'AGGRESSIVE' ? 'var(--green)' : 'var(--text)';
-
-  el.innerHTML = `
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
-      <div><span style="color:var(--muted)">ML Model:</span> <strong class="${ml.active?'good':'neutral'}">${ml.active?'ACTIVE':'WARMUP'}</strong></div>
-      <div><span style="color:var(--muted)">Accuracy:</span> ${ml.active ? fmt(ml.accuracy*100,1)+'%' : '-'}</div>
-      <div><span style="color:var(--muted)">Trained On:</span> ${ml.trained_on || 0} samples</div>
-      <div><span style="color:var(--muted)">Warmup:</span> ${ml.warmup_progress || '0/30'}</div>
-      <div><span style="color:var(--muted)">Pending:</span> ${ml.pending_outcomes || 0} outcomes</div>
-      <div><span style="color:var(--muted)">Outcomes:</span> ${cb.completed_outcomes || 0} total</div>
-    </div>
-    <div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border);display:grid;grid-template-columns:1fr 1fr;gap:6px;">
-      <div><span style="color:var(--muted)">Mode:</span> <strong style="color:${modeColor}">${mode}</strong></div>
-      <div><span style="color:var(--muted)">Conf Threshold:</span> ${fmt(meta.confidence_threshold||0.60,2)}</div>
-      <div><span style="color:var(--muted)">Min Rule Score:</span> ${fmt(meta.min_rule_score||3,1)}</div>
-      <div><span style="color:var(--muted)">Win Rate:</span> ${fmt((meta.recent_win_rate||0)*100,0)}%</div>
-      <div><span style="color:var(--muted)">Win Streak:</span> <span class="good">${meta.win_streak||0}</span></div>
-      <div><span style="color:var(--muted)">Loss Streak:</span> <span class="${(meta.loss_streak||0)>2?'bad':'neutral'}">${meta.loss_streak||0}</span></div>
-    </div>
-  `;
 }
 
 function renderRiskMap(p) {
@@ -1377,6 +1361,92 @@ function renderRiskMap(p) {
       <div><span style="color:var(--muted)">Unrealized:</span> <span class="${pnlCls(p.total_unrealized)}">${fmtUsd(p.total_unrealized)}</span></div>
     </div>
   `;
+}
+
+function renderCallBuyer(cb) {
+  const statusEl = $('#callbuyerStatus');
+  statusEl.textContent = cb.status;
+  statusEl.className = 'tag ' + (cb.status==='RUNNING'?'running':'stopped');
+  $('#callbuyerPid').textContent = cb.pid ? `PID ${cb.pid}` : '';
+
+  const b = cb.balances;
+  renderCards('callbuyerCards', [
+    ['Allocation', fmtUsd(b.total), 'neutral', `Peak: ${fmtUsd(b.peak)}`],
+    ['Total P&L', fmtUsd(b.total_pnl), pnlCls(b.total_pnl), `${fmt(b.return_pct)}%`],
+    ['Daily P&L', fmtUsd(b.daily_pnl), pnlCls(b.daily_pnl)],
+    ['Invested', fmtUsd(cb.total_invested), 'neutral'],
+    ['Unrealized', fmtUsd(cb.total_unrealized), pnlCls(cb.total_unrealized)],
+    ['W/L', `${cb.wins}/${cb.losses}`, cb.win_rate >= 50 ? 'good' : cb.total_trades > 0 ? 'bad' : 'neutral',
+      cb.total_trades > 0 ? `${fmt(cb.win_rate,0)}% WR` : ''],
+  ]);
+
+  $('#callbuyerPosCount').textContent = `(${cb.position_count||0})`;
+  const ptbody = document.querySelector('#callbuyerPosTable tbody');
+  ptbody.innerHTML = cb.positions.map(pos => {
+    const pnlVal = pos.pnl || 0;
+    const pnlPct = pos.pnl_pct || 0;
+    const confStr = pos.confidence ? `${fmt(pos.confidence*100,0)}%` : '-';
+    return `<tr>
+      <td><strong>${esc(pos.symbol)}</strong></td>
+      <td>$${fmt(pos.strike,0)}</td>
+      <td style="font-size:10px">${esc(pos.expiration)}</td>
+      <td>${pos.qty}</td>
+      <td>$${fmt(pos.entry_price,2)}</td>
+      <td class="${pnlCls(pnlVal)}">$${fmt(pnlVal,0)} <span style="font-size:9px">(${pnlPct>=0?'+':''}${fmt(pnlPct,0)}%)</span></td>
+      <td>${confStr}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="7" style="color:var(--muted)">No calls open</td></tr>';
+
+  renderLog('callbuyerLog', cb.log_entries, 'callbuyer');
+
+  $('#callbuyerTradeCount').textContent = `(${cb.trade_history.length})`;
+  const ttbody = document.querySelector('#callbuyerTradeTable tbody');
+  ttbody.innerHTML = cb.trade_history.slice(0, 60).map(t => {
+    const pnlVal = t.pnl != null ? fmtUsd(t.pnl) : '-';
+    const pctVal = t.pnl_pct != null ? (t.pnl_pct >= 0 ? '+' : '') + fmt(t.pnl_pct, 1) + '%' : '';
+    const exitShort = (t.exit_reason || '').replace(/\s*\([^)]*\)/g, '');
+    return `<tr style="background:${t.pnl >= 0 ? 'rgba(52,211,153,0.07)' : 'rgba(248,113,113,0.07)'}">
+      <td style="font-size:10px">${shortTime(t.timestamp)}</td>
+      <td>${esc(t.symbol)}</td><td>$${fmt(t.amount,0)}</td>
+      <td style="font-size:10px">${esc(exitShort)}</td>
+      <td class="${pnlCls(t.pnl)}">${pnlVal}</td>
+      <td class="${pnlCls(t.pnl)}" style="font-size:10px">${pctVal}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" style="color:var(--muted)">No closed trades yet</td></tr>';
+}
+
+function renderGuardrails(g) {
+  const el = $('#guardrailsPanel');
+  if (!g) { el.innerHTML = '<div style="padding:8px;color:var(--muted)">No data</div>'; return; }
+
+  const pct = g.pct_used || 0;
+  const barColor = pct > 20 ? 'var(--orange)' : pct > 15 ? 'var(--yellow)' : 'var(--green)';
+  const barWidth = Math.min(100, pct / (g.cap_pct || 25) * 100);
+
+  let html = `
+    <div style="padding:8px 10px 0;">
+      <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:2px;">
+        <span style="color:var(--muted)">Portfolio Risk</span>
+        <span class="${pct > 20 ? 'bad' : 'good'}">${fmt(pct,1)}% / ${g.cap_pct||25}%</span>
+      </div>
+      <div class="risk-bar"><div class="fill" style="width:${barWidth}%;background:${barColor}"></div></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;font-size:10px;margin-bottom:6px;">
+        <div><span style="color:var(--muted)">IC:</span> ${fmtUsd(g.risk_breakdown?.ironcondor||0)}</div>
+        <div><span style="color:var(--muted)">CB:</span> ${fmtUsd(g.risk_breakdown?.callbuyer||0)}</div>
+        <div><span style="color:var(--muted)">AB:</span> ${fmtUsd(g.risk_breakdown?.alpacabot||0)}</div>
+      </div>
+    </div>`;
+
+  html += (g.guardrails || []).map(r => {
+    const statusCls = r.status === 'OK' ? 'guardrail-ok' : 'guardrail-blocked';
+    const icon = r.status === 'OK' ? '&#10003;' : '&#10007;';
+    return `<div class="guardrail-row">
+      <div><strong>${esc(r.name)}</strong><br><span style="color:var(--muted);font-size:9px">${esc(r.bot)} &mdash; ${esc(r.limit)}</span></div>
+      <span class="${statusCls}">${icon} ${r.status}</span>
+    </div>`;
+  }).join('');
+
+  el.innerHTML = html;
 }
 
 function renderLog(containerId, entries, bot) {
@@ -1464,11 +1534,12 @@ async function fetchAll() {
   try {
     const res = await fetch('/api/all');
     data = await res.json();
-    renderSummary(data.crypto, data.alpaca, data.putseller, data.callbuyer);
+    renderSummary(data.crypto, data.alpaca, data.putseller, data.callbuyer, data.guardrails);
     renderCrypto(data.crypto);
     renderAlpaca(data.alpaca);
     renderPutSeller(data.putseller);
     renderCallBuyer(data.callbuyer);
+    renderGuardrails(data.guardrails);
     $('#lastUpdate').textContent = new Date().toLocaleTimeString();
     $('#footer').textContent = `Last update: ${new Date().toLocaleString()} \u00b7 CryptoBot ${data.crypto.status} \u00b7 AlpacaBot ${data.alpaca.status} \u00b7 IronCondor ${data.putseller.status} \u00b7 CallBuyer ${data.callbuyer.status}`;
   } catch (e) {

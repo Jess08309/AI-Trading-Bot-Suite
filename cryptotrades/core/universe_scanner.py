@@ -5,14 +5,14 @@ Dynamically discovers and ranks crypto coins for trading.
 Expands beyond the static 18-coin watchlist to scan 200+ coins.
 
 Data sources (all FREE, no API key required):
+  - Alpaca: available crypto trading pairs (requires API key)
   - CoinGecko: top coins by market cap, trending coins
-  - Coinbase: available trading pairs (public endpoint)
   - Kraken Futures: available perpetuals (public endpoint)
 
 Flow:
   1. Pull top 250 coins by market cap from CoinGecko
   2. Get trending coins (momentum factor)
-  3. Cross-reference with Coinbase available pairs
+  3. Cross-reference with Alpaca available crypto pairs
   4. Score each coin: volume, momentum, market cap, trend
   5. Return ranked list of tradeable symbols
 
@@ -70,7 +70,7 @@ class ScannerConfig:
         # Wrapped/bridged tokens
         'WBTC', 'WETH', 'STETH', 'RETH', 'CBETH', 'WSTETH',
         'WBETH', 'WSOL',
-        # Exchange tokens (not on Coinbase)
+        # Exchange tokens (not typically on Alpaca crypto)
         'BNB', 'LEO', 'OKB', 'CRO', 'KCS', 'GT', 'MX', 'HT',
         'BGB', 'WBT', 'HTX', 'NEXO',
         # Tokenized assets / RWA with low crypto utility
@@ -82,48 +82,57 @@ class ScannerConfig:
 
 
 # ═══════════════════════════════════════════════════════════
-#  COINBASE PAIR DISCOVERY
+#  ALPACA CRYPTO PAIR DISCOVERY
 # ═══════════════════════════════════════════════════════════
 
-class CoinbaseDiscovery:
-    """Discover which coins are tradeable on Coinbase."""
+class AlpacaDiscovery:
+    """Discover which coins are tradeable on Alpaca."""
 
-    PRODUCTS_URL = "https://api.exchange.coinbase.com/products"
+    ASSETS_URL = "https://paper-api.alpaca.markets/v2/assets"
     _cache: Optional[Set[str]] = None
     _cache_time: Optional[datetime] = None
     CACHE_TTL_HOURS = 6
 
     @classmethod
     def get_available_symbols(cls) -> Set[str]:
-        """Get set of base symbols available on Coinbase (e.g., {'BTC', 'ETH', ...})."""
+        """Get set of base symbols available on Alpaca (e.g., {'BTC', 'ETH', ...})."""
         if cls._cache and cls._cache_time:
             age = (datetime.now() - cls._cache_time).total_seconds() / 3600
             if age < cls.CACHE_TTL_HOURS:
                 return cls._cache
 
         try:
-            resp = requests.get(cls.PRODUCTS_URL, timeout=15, headers={
-                'User-Agent': 'CryptoBot/1.0'
-            })
+            api_key = os.getenv("ALPACA_API_KEY", "")
+            api_secret = os.getenv("ALPACA_API_SECRET", "")
+            headers = {
+                'User-Agent': 'CryptoBot/1.0',
+                'APCA-API-KEY-ID': api_key,
+                'APCA-API-SECRET-KEY': api_secret,
+            }
+            resp = requests.get(
+                cls.ASSETS_URL,
+                params={"asset_class": "crypto", "status": "active"},
+                timeout=15,
+                headers=headers,
+            )
             resp.raise_for_status()
-            products = resp.json()
+            assets = resp.json()
 
             symbols = set()
-            for p in products:
-                # Only USD/USDC pairs that are actively trading
-                quote = p.get("quote_currency", "")
-                status = p.get("status", "")
-                if quote in ("USD", "USDC") and status in ("online", ""):
-                    base = p.get("base_currency", "").upper()
+            for asset in assets:
+                # Alpaca crypto symbols are like "BTC/USD"
+                sym = asset.get("symbol", "")
+                if "/" in sym:
+                    base = sym.split("/")[0].upper()
                     if base:
                         symbols.add(base)
 
             cls._cache = symbols
             cls._cache_time = datetime.now()
-            log.info(f"Coinbase discovery: {len(symbols)} tradeable symbols")
+            log.info(f"Alpaca discovery: {len(symbols)} tradeable crypto symbols")
             return symbols
         except Exception as e:
-            log.warning(f"Coinbase discovery failed: {e}")
+            log.warning(f"Alpaca discovery failed: {e}")
             return cls._cache or set()
 
 
@@ -279,10 +288,10 @@ class CryptoUniverseScanner:
 
         # Core symbols that ALWAYS get included (the proven ones)
         self.core_spot: List[str] = core_symbols or [
-            "BTC-USD", "ETH-USD", "SOL-USD", "ADA-USD", "AVAX-USD",
-            "DOGE-USD", "LINK-USD", "XRP-USD", "LTC-USD", "UNI-USD",
-            "XLM-USD", "BCH-USD", "DOT-USD", "MATIC-USD", "ATOM-USD",
-            "NEAR-USD", "AAVE-USD", "PAXG-USD",
+            "BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "AVAX/USD",
+            "DOGE/USD", "LINK/USD", "XRP/USD", "LTC/USD", "UNI/USD",
+            "XLM/USD", "BCH/USD", "DOT/USD", "MATIC/USD", "ATOM/USD",
+            "NEAR/USD", "AAVE/USD", "PAXG/USD",
         ]
 
         # Scan state
@@ -302,7 +311,7 @@ class CryptoUniverseScanner:
         self.total_scans = 0
         self.last_scan_duration = 0.0
         self.coins_discovered = 0
-        self.coins_on_coinbase = 0
+        self.coins_on_alpaca = 0
         self.futures_discovered = 0
 
         graduated = sum(
@@ -371,10 +380,10 @@ class CryptoUniverseScanner:
 
         log.info("═══ Universe Scan Starting ═══")
 
-        # ── Step 1: Get Coinbase available pairs ──
-        coinbase_symbols = CoinbaseDiscovery.get_available_symbols()
-        self.coins_on_coinbase = len(coinbase_symbols)
-        log.info(f"  Coinbase: {len(coinbase_symbols)} tradeable symbols")
+        # ── Step 1: Get Alpaca available crypto pairs ──
+        alpaca_symbols = AlpacaDiscovery.get_available_symbols()
+        self.coins_on_alpaca = len(alpaca_symbols)
+        log.info(f"  Alpaca: {len(alpaca_symbols)} tradeable crypto symbols")
 
         # ── Step 2: Get top coins from CoinGecko ──
         top_coins = CoinGeckoData.get_top_coins(self.config.TOP_N_BY_MCAP)
@@ -395,8 +404,8 @@ class CryptoUniverseScanner:
             if sym in self.config.EXCLUDE_SYMBOLS:
                 continue
 
-            # Must be on Coinbase
-            if sym not in coinbase_symbols:
+            # Must be on Alpaca
+            if sym not in alpaca_symbols:
                 continue
 
             # Minimum market cap
@@ -419,12 +428,12 @@ class CryptoUniverseScanner:
         # ── Step 5: Build spot symbols list ──
         # Core symbols always first
         spot_symbols = list(self.core_spot)
-        core_bases = {s.replace("-USD", "") for s in self.core_spot}
+        core_bases = {s.replace("/USD", "") for s in self.core_spot}
 
         # Add top scored coins (candidates — probation applied below)
         all_candidates = []
         for sym, score_data in scored_coins:
-            coin_symbol = f"{sym}-USD"
+            coin_symbol = f"{sym}/USD"
             if coin_symbol not in spot_symbols and sym not in core_bases:
                 all_candidates.append(coin_symbol)
 
@@ -470,7 +479,7 @@ class CryptoUniverseScanner:
 
         # Build futures list — only for coins in our proven spot list
         # (futures for probation symbols NOT included)
-        spot_bases = {s.replace("-USD", "") for s in spot_symbols}
+        spot_bases = {s.replace("/USD", "") for s in spot_symbols}
         futures_symbols = []
         for base, futures_sym in kraken_futures.items():
             if base in spot_bases:
@@ -588,7 +597,7 @@ class CryptoUniverseScanner:
             "futures_symbols": len(self._cached_futures),
             "core_symbols": len(self.core_spot),
             "discovered_symbols": len(self._cached_spot) - len(self.core_spot),
-            "coinbase_available": self.coins_on_coinbase,
+            "alpaca_available": self.coins_on_alpaca,
             "coingecko_coins": self.coins_discovered,
             "kraken_futures": self.futures_discovered,
             "scan_interval_min": self.config.SCAN_INTERVAL_MIN,

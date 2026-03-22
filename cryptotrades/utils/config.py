@@ -62,16 +62,16 @@ class TradingConfig:
 
     # ── Symbol Lists ──────────────────────────────────────
     POPULAR_PAIRS: List[str] = field(default_factory=lambda: [
-        "BTC-USD", "ETH-USD", "SOL-USD", "ADA-USD", "AVAX-USD",
-        "DOGE-USD", "MATIC-USD", "LTC-USD", "LINK-USD", "SHIB-USD",
-        "XRP-USD", "DOT-USD", "UNI-USD", "ATOM-USD", "XLM-USD",
+        "BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "AVAX/USD",
+        "DOGE/USD", "MATIC/USD", "LTC/USD", "LINK/USD", "SHIB/USD",
+        "XRP/USD", "DOT/USD", "UNI/USD", "ATOM/USD", "XLM/USD",
     ])
 
     SPOT_WATCHLIST: List[str] = field(default_factory=lambda: [
-        "BTC-USD", "ETH-USD", "SOL-USD", "ADA-USD", "AVAX-USD",
-        "DOGE-USD", "MATIC-USD", "LTC-USD", "LINK-USD", "SHIB-USD",
-        "XRP-USD", "DOT-USD", "UNI-USD", "ATOM-USD", "XLM-USD", "AAVE-USD",
-        "OP-USD", "ARB-USD", "SUI-USD",  # Added for AI learning
+        "BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "AVAX/USD",
+        "DOGE/USD", "MATIC/USD", "LTC/USD", "LINK/USD", "SHIB/USD",
+        "XRP/USD", "DOT/USD", "UNI/USD", "ATOM/USD", "XLM/USD", "AAVE/USD",
+        "OP/USD", "ARB/USD", "SUI/USD",  # Added for AI learning
     ])
 
     KRAKEN_FUTURES_SYMBOLS: List[str] = field(default_factory=lambda: [
@@ -96,11 +96,10 @@ class TradingConfig:
     FUTURES_PROBATION_DEMOTE_MAX_AVG_PCT: float = -0.25
 
     # ── Feature Toggles ───────────────────────────────────
-    ENABLE_SPOT: bool = True          # spot trading/prices (Coinbase)
+    ENABLE_SPOT: bool = True          # spot trading/prices (Alpaca)
     ENABLE_FUTURES: bool = True       # futures trading/prices (Kraken)
-    ENABLE_COINBASE: bool = True      # connect to Coinbase for spot data
+    ENABLE_ALPACA: bool = True        # connect to Alpaca for spot data
     ENABLE_KRAKEN: bool = True        # connect to Kraken for futures data
-    ENABLE_COINBASE_FUTURES_DATA: bool = True  # use Coinbase futures market data (fallback to Kraken)
 
     # ── Timing ────────────────────────────────────────────
     CHECK_INTERVAL: int = 60          # seconds between risk monitoring cycles
@@ -200,8 +199,8 @@ class TradingConfig:
     QUIET_SIZE_REDUCTION: float = 0.5      # scale position size during quiet window
 
     # ── API Retry ─────────────────────────────────────────
-    COINBASE_RETRY_ATTEMPTS: int = 3
-    COINBASE_RETRY_BASE_DELAY: float = 0.5
+    ALPACA_RETRY_ATTEMPTS: int = 3
+    ALPACA_RETRY_BASE_DELAY: float = 0.5
     KRAKEN_RETRY_ATTEMPTS: int = 3
     KRAKEN_RETRY_BASE_DELAY: float = 0.5
 
@@ -246,17 +245,14 @@ class TradingConfig:
 
         self.ENABLE_SPOT = _env_bool("ENABLE_SPOT", self.ENABLE_SPOT)
         self.ENABLE_FUTURES = _env_bool("ENABLE_FUTURES", self.ENABLE_FUTURES)
-        self.ENABLE_COINBASE = _env_bool("ENABLE_COINBASE", self.ENABLE_COINBASE)
+        self.ENABLE_ALPACA = _env_bool("ENABLE_ALPACA", self.ENABLE_ALPACA)
         self.ENABLE_KRAKEN = _env_bool("ENABLE_KRAKEN", self.ENABLE_KRAKEN)
-        self.ENABLE_COINBASE_FUTURES_DATA = _env_bool(
-            "ENABLE_COINBASE_FUTURES_DATA", self.ENABLE_COINBASE_FUTURES_DATA
-        )
 
         self.CHECK_INTERVAL = _env_int("CHECK_INTERVAL", self.CHECK_INTERVAL)
         self.TRADE_INTERVAL = _env_int("TRADE_INTERVAL", self.TRADE_INTERVAL)
 
-        self.COINBASE_RETRY_ATTEMPTS = _env_int("COINBASE_RETRY_ATTEMPTS", self.COINBASE_RETRY_ATTEMPTS)
-        self.COINBASE_RETRY_BASE_DELAY = _env_float("COINBASE_RETRY_BASE_DELAY", self.COINBASE_RETRY_BASE_DELAY)
+        self.ALPACA_RETRY_ATTEMPTS = _env_int("ALPACA_RETRY_ATTEMPTS", self.ALPACA_RETRY_ATTEMPTS)
+        self.ALPACA_RETRY_BASE_DELAY = _env_float("ALPACA_RETRY_BASE_DELAY", self.ALPACA_RETRY_BASE_DELAY)
         self.KRAKEN_RETRY_ATTEMPTS = _env_int("KRAKEN_RETRY_ATTEMPTS", self.KRAKEN_RETRY_ATTEMPTS)
         self.KRAKEN_RETRY_BASE_DELAY = _env_float("KRAKEN_RETRY_BASE_DELAY", self.KRAKEN_RETRY_BASE_DELAY)
 
@@ -362,7 +358,7 @@ class TradingConfig:
             f"SL={self.FUTURES_STOP_LOSS}%, TP={self.FUTURES_TAKE_PROFIT}%",
             f"  Circuit Breaker: {self.CB_MAX_CONSECUTIVE_LOSSES} losses, "
             f"daily {self.CB_DAILY_LOSS_LIMIT_PCT}%, dd {self.CB_MAX_DRAWDOWN_PCT}%",
-            f"  Retry: Coinbase {self.COINBASE_RETRY_ATTEMPTS}x, Kraken {self.KRAKEN_RETRY_ATTEMPTS}x",
+            f"  Retry: Alpaca {self.ALPACA_RETRY_ATTEMPTS}x, Kraken {self.KRAKEN_RETRY_ATTEMPTS}x",
             f"  Discord Alerts: {'ON' if self.DISCORD_WEBHOOK_URL else 'OFF'}",
         ]
         return "\n".join(lines)

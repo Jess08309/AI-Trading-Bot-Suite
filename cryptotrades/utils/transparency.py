@@ -58,7 +58,7 @@ class TransparencyTracker:
         Log a trade entry with signal details
         
         Args:
-            symbol: Trading pair (BTC-USD, ETH-USD, etc.)
+            symbol: Trading pair (BTC/USD, ETH/USD, etc.)
             direction: LONG or SHORT
             entry_price: Entry price
             size: Position size in USD

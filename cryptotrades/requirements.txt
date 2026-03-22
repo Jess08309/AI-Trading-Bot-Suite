@@ -8,7 +8,6 @@ joblib>=1.3.0
 websocket-client>=1.6.0
 
 # === Optional: Enhanced features ===
-# torch — RL agent DQN (falls back to Q-table without it)
-# coinbase — Coinbase spot trading API
-# transformers — HuggingFace NLP sentiment (falls back to RSS)
+# torch — RL agent DQN + GPU neural net (falls back to Q-table/CPU without it)
+# transformers — HuggingFace NLP sentiment (falls back to keyword matching)
 # feedparser — RSS news feed parsing

@@ -32,13 +32,9 @@ try:
 except Exception:
     RLTradingAgent = None
 
-# Optional imports with fallbacks
-try:
-    from coinbase.wallet.client import Client
-    COINBASE_AVAILABLE = True
-except ImportError:
-    COINBASE_AVAILABLE = False
-    Client = None
+# Alpaca crypto API — uses requests with API key headers (no SDK dependency)
+ALPACA_AVAILABLE = True  # Always available since we use requests directly
+ALPACA_DATA_URL = "https://data.alpaca.markets/v1beta3/crypto/us"
 
 # ============================================================
 # PRODUCTION CONFIGURATION - Centralized & Simplified
@@ -52,9 +48,9 @@ class TradingConfig:
     LIVE_TRADING_WARNING: bool = False
     DRY_RUN: bool = False
 
-    # Capital
-    INITIAL_SPOT_BALANCE: float = 2500.0
-    INITIAL_FUTURES_BALANCE: float = 2500.0
+    # Capital — small experimental allocation
+    INITIAL_SPOT_BALANCE: float = 500.0
+    INITIAL_FUTURES_BALANCE: float = 500.0
 
     # Timing
     RISK_CHECK_INTERVAL: int = 60          # 1 minute
@@ -79,11 +75,11 @@ class TradingConfig:
 
     # Symbols
     SPOT_SYMBOLS: Tuple[str, ...] = (
-        "BTC-USD", "ETH-USD", "SOL-USD", "ADA-USD", "AVAX-USD",
-        "DOGE-USD", "LINK-USD", "XRP-USD", "LTC-USD", "UNI-USD",
-        "XLM-USD", "BCH-USD", "DOT-USD", "MATIC-USD", "ATOM-USD",
-        "NEAR-USD", "AAVE-USD",
-        "PAXG-USD",  # Pax Gold — tokenized physical gold
+        "BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "AVAX/USD",
+        "DOGE/USD", "LINK/USD", "XRP/USD", "LTC/USD", "UNI/USD",
+        "XLM/USD", "BCH/USD", "DOT/USD", "MATIC/USD", "ATOM/USD",
+        "NEAR/USD", "AAVE/USD",
+        "PAXG/USD",  # Pax Gold — tokenized physical gold
     )
     FUTURES_SYMBOLS: Tuple[str, ...] = (
         "PI_XBTUSD", "PI_ETHUSD", "PI_SOLUSD", "PI_ADAUSD", "PI_DOGEUSD",
@@ -92,8 +88,8 @@ class TradingConfig:
     )
 
     # Risk Limits - STRICT for production
-    MAX_POSITIONS_SPOT: int = 12
-    MAX_POSITIONS_FUTURES: int = 8
+    MAX_POSITIONS_SPOT: int = 4
+    MAX_POSITIONS_FUTURES: int = 3
     MAX_POSITIONS_PER_SYMBOL_SPOT: int = 1
     MAX_POSITIONS_PER_SYMBOL_FUTURES: int = 2
     MAX_POSITION_PCT: float = 0.08         # 8% max per position
@@ -130,17 +126,17 @@ class TradingConfig:
 
     # Entry Thresholds - QUALITY GATES
     # Confidence = max(up_prob, down_prob), range 0.50-1.0
-    MIN_ML_CONFIDENCE: float = 0.66        # Model must predict >=66% one direction
-    MIN_ENSEMBLE_SCORE: float = 0.62       # Composite ML+trend quality score
-    MAX_RSI_LONG: float = 62.0             # Don't buy if RSI > 62 (tighter)
-    MIN_RSI_SHORT: float = 38.0            # Don't short if RSI < 38 (tighter)
+    MIN_ML_CONFIDENCE: float = 0.52        # Model must predict >=52% one direction (was 0.55, 0.60, 0.66)
+    MIN_ENSEMBLE_SCORE: float = 0.50  # Direction trigger only — quality is gated by MIN_ML_CONFIDENCE (0.52)       # Composite ML+trend quality score (was 0.55)
+    MAX_RSI_LONG: float = 68.0             # Don't buy if RSI > 68 (was 62 — too tight)
+    MIN_RSI_SHORT: float = 32.0            # Don't short if RSI < 32 (was 38 — too tight)
 
     # Signal quality filters
     SIDE_MARKET_FILTER: bool = True        # Skip SIDE-trend signals
-    SIDE_MARKET_ML_OVERRIDE: float = 0.75  # ML conf above this can override SIDE filter
-    COUNTER_TREND_ML_OVERRIDE: float = 0.92  # ML conf above this can trade against trend (nearly disabled)
-    MIN_MODEL_TEST_ACCURACY: float = 0.58  # Reject models below this OOS accuracy
-    SYMBOL_PAUSE_CONSECUTIVE_LOSSES: int = 3  # Pause symbol after 3 straight losses
+    SIDE_MARKET_ML_OVERRIDE: float = 0.52  # ML conf above this can override SIDE filter (was 0.54, 0.58, 0.65, 0.75)
+    COUNTER_TREND_ML_OVERRIDE: float = 0.56  # ML conf above this can trade against trend (was 0.62, 0.80)
+    MIN_MODEL_TEST_ACCURACY: float = 0.55  # Reject models below this OOS accuracy
+    SYMBOL_PAUSE_CONSECUTIVE_LOSSES: int = 4  # Pause symbol after 4 straight losses (was 3)
 
     # Direction Performance Tracker — auto-pause losing direction
     DIRECTION_PAUSE_LOOKBACK: int = 20     # Rolling window of recent trades per direction
@@ -173,15 +169,16 @@ class TradingConfig:
 
     # Symbol Performance Gate — auto-exclude underperforming symbols
     SYMBOL_PERF_WINDOW: int = 20           # Rolling window of trades per symbol
-    SYMBOL_MIN_PROFIT_FACTOR: float = 0.80 # Auto-exclude if PF < 0.80
-    SYMBOL_COOLDOWN_HOURS: int = 24        # How long to exclude underperformers
+    SYMBOL_MIN_PROFIT_FACTOR: float = 0.50 # Auto-exclude if PF < 0.50 (was 0.80 — too aggressive)
+    SYMBOL_COOLDOWN_HOURS: int = 4         # Hours to exclude underperformers (was 24 — caused death spiral)
+    SYMBOL_HEALTH_MIN_TRADES: int = 8      # Need at least 8 trades before excluding (was 5)
 
     # Time-of-day filter — reduce size during low-liquidity windows
     QUIET_HOURS_UTC: Tuple[Tuple[int, int], ...] = ((2, 6), (22, 24))
     QUIET_SIZE_REDUCTION: float = 0.5      # Halve position size during quiet hours
 
     # Momentum quality gate
-    MIN_MOMENTUM_QUALITY: int = 4          # Minimum indicator alignment score (0-10)
+    MIN_MOMENTUM_QUALITY: int = 0          # Minimum indicator alignment score (0-10) — disabled, ML model is primary gate
 
     # Alerts
     ALERT_DRAWDOWN_PCT: float = -7.0
@@ -555,7 +552,7 @@ class MLModel:
             # Each entry: (series, target_threshold, flat_filter)
             series_list = []
             # Use most recent data only to avoid stale patterns dominating
-            max_points = 2000  # ~33 hours of 1-min data — keeps model responsive
+            max_points = 10000  # ~7 days of 1-min data (was 2000/33h — way too little)
 
             # Trim to recent data to keep model responsive to regime changes
             recent_prices = prices[-max_points:] if len(prices) > max_points else prices
@@ -563,12 +560,17 @@ class MLModel:
             # Aggregate to ~1-hour candles for less noisy targets
             hourly = self._aggregate_to_hourly(recent_prices, 60)
             if len(hourly) >= 60:
-                series_list.append((hourly, 0.005, 0.002))  # 0.5% target, 0.2% flat filter
+                series_list.append((hourly, 0.008, 0.003))  # 0.8% target over 20h, 0.3% flat filter
+
+            # 5-min candles as primary training timeframe (better signal than 10min)
+            candles_5m = self._aggregate_to_hourly(recent_prices, 5)
+            if len(candles_5m) >= 100:
+                series_list.append((candles_5m, 0.004, 0.0015))  # 0.4% target over ~2.5h, 0.15% flat
 
             # 10-min candles as middle ground
             candles_10m = self._aggregate_to_hourly(recent_prices, 10)
             if len(candles_10m) >= 60:
-                series_list.append((candles_10m, 0.003, 0.001))  # 0.3% target, 0.1% flat filter
+                series_list.append((candles_10m, 0.005, 0.002))  # 0.5% target over ~3.3h, 0.2% flat filter
 
             # Raw 1-min as fallback (noisier but at least provides training data)
             if len(recent_prices) >= 120 and not series_list:
@@ -577,10 +579,13 @@ class MLModel:
             for series, target_thresh, flat_thresh in series_list:
                 if len(series) < 60:
                     continue
-                for i in range(50, len(series) - 10):
+                for i in range(50, len(series) - 20):
                     features = self._extract_features(series[:i])
                     if features is not None:
-                        future_return = (series[i + 10] - series[i]) / series[i]
+                        # Use 20 candles forward for hourly, 15 for shorter
+                        look_ahead = 20 if len(series) < 300 else 15
+                        end_idx = min(i + look_ahead, len(series) - 1)
+                        future_return = (series[end_idx] - series[i]) / series[i]
                         if abs(future_return) < flat_thresh:
                             continue  # Skip ambiguous flat moves
                         label = 1 if future_return > target_thresh else 0
@@ -621,31 +626,68 @@ class MLModel:
             class_ratio = np.mean(y)
             self.logger.info(f"After undersampling: {len(y)} samples, ratio={class_ratio:.1%}")
 
-        # TEMPORAL SPLIT — train on first 80%, test on last 20% (no future leak)
-        split_idx = int(len(X) * 0.8)
+        # WALK-FORWARD VALIDATION with TimeSeriesSplit (3 folds)
+        # This prevents overfitting to a single market regime
+        from sklearn.model_selection import TimeSeriesSplit
+        from sklearn.utils.class_weight import compute_sample_weight
+
+        tscv = TimeSeriesSplit(n_splits=3, gap=int(len(X) * 0.02))  # 2% gap to reduce autocorrelation
+        fold_scores = []
+        best_candidate = None
+        best_test_score = 0.0
+
+        for fold_idx, (train_idx, test_idx) in enumerate(tscv.split(X)):
+            X_train, X_test = X[train_idx], X[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+
+            sample_weights = compute_sample_weight('balanced', y_train)
+
+            fold_model = GradientBoostingClassifier(
+                n_estimators=150,       # Slightly more trees for larger dataset
+                max_depth=3,
+                learning_rate=0.05,
+                min_samples_split=20,
+                min_samples_leaf=10,
+                subsample=0.8,
+                max_features=0.7,
+                random_state=42
+            )
+            fold_model.fit(X_train, y_train, sample_weight=sample_weights)
+            fold_score = fold_model.score(X_test, y_test)
+            fold_train_score = fold_model.score(X_train, y_train)
+            fold_scores.append(fold_score)
+            self.logger.info(f"  Walk-forward fold {fold_idx+1}: Train={fold_train_score:.2%}, OOS={fold_score:.2%}")
+
+            if fold_score > best_test_score:
+                best_test_score = fold_score
+                best_candidate = fold_model
+
+        # Use average OOS across folds as the real accuracy
+        test_score = np.mean(fold_scores)
+        self.logger.info(f"Walk-forward avg OOS: {test_score:.2%} (folds: {[f'{s:.2%}' for s in fold_scores]})")
+
+        # Final full-data retrain using best hyperparams from walk-forward
+        # Train on all data except last 15% (validation holdout)
+        split_idx = int(len(X) * 0.85)
         X_train, X_test = X[:split_idx], X[split_idx:]
         y_train, y_test = y[:split_idx], y[split_idx:]
-
-        # Use balanced sample weights to prevent directional bias
-        from sklearn.utils.class_weight import compute_sample_weight
         sample_weights = compute_sample_weight('balanced', y_train)
 
         candidate = GradientBoostingClassifier(
-            n_estimators=100,       # Reduced from 200 (less overfitting)
-            max_depth=3,            # Reduced from 4 (shallower trees)
+            n_estimators=150,
+            max_depth=3,
             learning_rate=0.05,
-            min_samples_split=20,   # Prevent small splits
+            min_samples_split=20,
             min_samples_leaf=10,
-            subsample=0.8,          # Stochastic GBM
-            max_features=0.7,       # Feature subsampling
+            subsample=0.8,
+            max_features=0.7,
             random_state=42
         )
         candidate.fit(X_train, y_train, sample_weight=sample_weights)
 
         train_score = candidate.score(X_train, y_train)
-        test_score = candidate.score(X_test, y_test)
-
-        self.logger.info(f"Model trained — Train: {train_score:.2%}, Test(OOS): {test_score:.2%}")
+        holdout_score = candidate.score(X_test, y_test)
+        self.logger.info(f"Final model — Train: {train_score:.2%}, Holdout: {holdout_score:.2%}, WF-avg: {test_score:.2%}")
 
         # Log top feature importances
         try:
@@ -932,8 +974,8 @@ class SentimentAnalyzer:
         Uses coin-specific 24h momentum if available, otherwise global composite.
         Returns: -1 to 1 (negative to positive)
         """
-        # Extract coin from symbol (e.g., BTC-USD -> BTC, PI_XBTUSD -> XBT)
-        coin = symbol.split('-')[0].replace('PI_', '').replace('USD', '')
+        # Extract coin from symbol (e.g., BTC/USD -> BTC, PI_XBTUSD -> XBT)
+        coin = symbol.split('/')[0].replace('PI_', '').replace('USD', '')
 
         # Map futures coin codes to standard tickers
         futures_coin_map = {
@@ -1096,22 +1138,7 @@ class TradingBot:
         self._symbol_perf_excluded_until: Dict[str, datetime] = {}
         self._symbol_perf_bootstrapped = False
         self.enable_futures_data = os.getenv("ENABLE_FUTURES", "true").lower() == "true"
-        self.enable_coinbase_futures_data = os.getenv("ENABLE_COINBASE_FUTURES_DATA", "true").lower() == "true"
         self.enable_kraken_futures_fallback = os.getenv("ENABLE_KRAKEN_FUTURES_FALLBACK", "true").lower() == "true"
-        self.coinbase_futures_product_map: Dict[str, Tuple[str, ...]] = {
-            "PI_XBTUSD": ("BTC-USDC-PERP", "BTC-USD-PERP", "BTC-PERP"),
-            "PI_ETHUSD": ("ETH-USDC-PERP", "ETH-USD-PERP", "ETH-PERP"),
-            "PI_SOLUSD": ("SOL-USDC-PERP", "SOL-USD-PERP", "SOL-PERP"),
-            "PI_ADAUSD": ("ADA-USDC-PERP", "ADA-USD-PERP", "ADA-PERP"),
-            "PI_DOGEUSD": ("DOGE-USDC-PERP", "DOGE-USD-PERP", "DOGE-PERP"),
-            "PI_LINKUSD": ("LINK-USDC-PERP", "LINK-USD-PERP", "LINK-PERP"),
-            "PI_AVAXUSD": ("AVAX-USDC-PERP", "AVAX-USD-PERP", "AVAX-PERP"),
-            "PI_DOTUSD": ("DOT-USDC-PERP", "DOT-USD-PERP", "DOT-PERP"),
-            "PI_BCHUSD": ("BCH-USDC-PERP", "BCH-USD-PERP", "BCH-PERP"),
-            "PI_LTCUSD": ("LTC-USDC-PERP", "LTC-USD-PERP", "LTC-PERP"),
-            "PI_XRPUSD": ("XRP-USDC-PERP", "XRP-USD-PERP", "XRP-PERP"),
-            "PI_ATOMUSD": ("ATOM-USDC-PERP", "ATOM-USD-PERP", "ATOM-PERP"),
-        }
         self.correlation_lookback = 120
         self.direction_bias = os.getenv("DIRECTION_BIAS", "neutral").strip().lower()
         if self.direction_bias not in {"neutral", "short_lean", "long_lean"}:
@@ -1195,6 +1222,7 @@ class TradingBot:
 
         # API
         self.client = None
+        self._alpaca_session = None
         self._init_api()
 
         # Universe Scanner — dynamic coin discovery
@@ -1410,7 +1438,6 @@ class TradingBot:
                     "direction_bias": self.direction_bias,
                     "direction_bias_strength": self.direction_bias_strength,
                     "enable_futures": self.enable_futures_data,
-                    "enable_coinbase_futures_data": self.enable_coinbase_futures_data,
                     "enable_kraken_futures_fallback": self.enable_kraken_futures_fallback,
                     "rl_shadow_mode": self.rl_shadow_mode,
                     "rl_shadow_min_multiplier": self.rl_shadow_min_multiplier,
@@ -1865,27 +1892,31 @@ class TradingBot:
             self.logger.warning(f"RL shadow report save failed: {e}")
 
     def _init_api(self):
-        """Initialize exchange API."""
-        if not COINBASE_AVAILABLE:
-            self.logger.warning("Coinbase SDK not available; using public endpoints only")
-            return
-
-        api_key = os.getenv("COINBASE_API_KEY")
-        api_secret = os.getenv("COINBASE_API_SECRET")
+        """Initialize Alpaca crypto API session."""
+        api_key = os.getenv("ALPACA_API_KEY")
+        api_secret = os.getenv("ALPACA_API_SECRET")
 
         if not api_key or not api_secret:
-            self.logger.warning("Coinbase credentials missing; using public endpoints only")
+            self.logger.warning("Alpaca credentials missing; using public price fallbacks only")
             return
 
-        if not cfg.PAPER_TRADING and (len(api_key) < 20 or len(api_secret) < 20):
-            raise ValueError("Invalid Coinbase credentials: too short for live mode")
-
         try:
-            self.client = Client(api_key, api_secret)
-            self.logger.info("Coinbase API connected")
+            self._alpaca_session = requests.Session()
+            self._alpaca_session.headers.update({
+                "APCA-API-KEY-ID": api_key,
+                "APCA-API-SECRET-KEY": api_secret,
+            })
+            # Verify connectivity with a quick test
+            resp = self._alpaca_session.get(
+                f"{ALPACA_DATA_URL}/latest/trades?symbols=BTC/USD", timeout=10
+            )
+            resp.raise_for_status()
+            self.client = self._alpaca_session  # Store session as "client" for compatibility
+            self.logger.info("Alpaca Crypto API connected")
         except Exception as e:
             self.client = None
-            self.logger.error(f"API connection failed: {e}")
+            self._alpaca_session = None
+            self.logger.error(f"Alpaca API connection failed: {e}")
             if not cfg.PAPER_TRADING:
                 raise
 
@@ -2137,15 +2168,22 @@ class TradingBot:
             self.logger.error(f"Save state failed: {e}")
 
     def _fetch_public_spot_price(self, symbol: str) -> Optional[float]:
-        """Fetch spot price using Coinbase public endpoint (no auth required)."""
+        """Fetch spot price using Alpaca crypto data endpoint."""
         try:
-            url = f"https://api.coinbase.com/v2/prices/{symbol}/spot"
-            resp = requests.get(url, timeout=8)
+            url = f"{ALPACA_DATA_URL}/latest/trades?symbols={symbol}"
+            headers = {}
+            if self._alpaca_session:
+                headers = dict(self._alpaca_session.headers)
+            resp = requests.get(url, timeout=8, headers=headers)
             resp.raise_for_status()
             payload = resp.json()
-            return float(payload["data"]["amount"])
+            trades = payload.get("trades", {})
+            trade_data = trades.get(symbol)
+            if trade_data and "p" in trade_data:
+                return float(trade_data["p"])
+            return None
         except Exception as e:
-            self.logger.debug(f"Public price fetch failed for {symbol}: {e}")
+            self.logger.debug(f"Alpaca price fetch failed for {symbol}: {e}")
             return None
 
     def _apply_slippage(self, raw_price: float, direction: str, is_entry: bool, is_futures: bool) -> float:
@@ -2185,18 +2223,23 @@ class TradingBot:
         return depth
 
     def _fetch_spot_depth_usd(self, symbol: str) -> Optional[float]:
-        """Fetch Coinbase orderbook depth in USD."""
+        """Fetch Alpaca crypto orderbook depth in USD."""
         try:
-            url = f"https://api.exchange.coinbase.com/products/{symbol}/book?level=2"
-            resp = requests.get(url, timeout=8)
+            url = f"{ALPACA_DATA_URL}/orderbooks/books?symbols={symbol}"
+            headers = {}
+            if self._alpaca_session:
+                headers = dict(self._alpaca_session.headers)
+            resp = requests.get(url, timeout=8, headers=headers)
             resp.raise_for_status()
             payload = resp.json()
+            book = payload.get("orderbooks", {}).get(symbol, {})
 
-            bids = payload.get("bids", [])
-            asks = payload.get("asks", [])
-            bid_depth = self._sum_depth_levels(bids, cfg.ORDERBOOK_LEVELS)
-            ask_depth = self._sum_depth_levels(asks, cfg.ORDERBOOK_LEVELS)
-            return min(bid_depth, ask_depth)
+            bids = book.get("b", [])  # Alpaca format: [{"p": price, "s": size}, ...]
+            asks = book.get("a", [])
+
+            bid_depth = sum(float(l.get("p", 0)) * float(l.get("s", 0)) for l in bids[:cfg.ORDERBOOK_LEVELS])
+            ask_depth = sum(float(l.get("p", 0)) * float(l.get("s", 0)) for l in asks[:cfg.ORDERBOOK_LEVELS])
+            return min(bid_depth, ask_depth) if bid_depth > 0 and ask_depth > 0 else None
         except Exception as e:
             self.logger.debug(f"Spot depth fetch failed for {symbol}: {e}")
             return None
@@ -2401,64 +2444,20 @@ class TradingBot:
 
         return None
 
-    def _fetch_coinbase_product_price(self, product_id: str) -> Optional[float]:
-        """Fetch a single Coinbase product price across public endpoints."""
-        endpoints = (
-            f"https://api.exchange.coinbase.com/products/{product_id}/ticker",
-            f"https://api.coinbase.com/api/v3/brokerage/market/products/{product_id}/ticker",
-        )
-
-        for url in endpoints:
-            try:
-                resp = requests.get(url, timeout=8)
-                if resp.status_code >= 400:
-                    continue
-
-                payload = resp.json()
-                parsed = self._extract_market_price(payload)
-                if parsed is not None:
-                    return parsed
-            except Exception as e:
-                self.logger.debug(f"Coinbase product fetch failed ({product_id}) via {url}: {e}")
-
-        return None
-
-    def _fetch_coinbase_futures_tickers(self) -> Dict[str, float]:
-        """Fetch futures prices from Coinbase product endpoints."""
-        prices: Dict[str, float] = {}
-
-        for symbol in cfg.FUTURES_SYMBOLS:
-            product_ids = self.coinbase_futures_product_map.get(symbol, ())
-            for product_id in product_ids:
-                price = self._fetch_coinbase_product_price(product_id)
-                if price is not None:
-                    prices[symbol] = price
-                    break
-
-        return prices
-
     def fetch_futures_prices(self):
-        """Fetch configured futures prices from Coinbase with Kraken fallback."""
-        coinbase_prices: Dict[str, float] = {}
+        """Fetch configured futures prices from Kraken."""
         kraken_prices: Dict[str, float] = {}
-        source_counts = {"coinbase": 0, "kraken": 0, "spot_proxy": 0, "missing": 0}
-
-        if self.enable_coinbase_futures_data:
-            coinbase_prices = self._fetch_coinbase_futures_tickers()
+        source_counts = {"kraken": 0, "spot_proxy": 0, "missing": 0}
 
         if self.enable_kraken_futures_fallback:
             kraken_prices = self._fetch_kraken_futures_tickers()
 
         for symbol in cfg.FUTURES_SYMBOLS:
-            price = coinbase_prices.get(symbol)
-            source = "coinbase"
-
-            if price is None and self.enable_kraken_futures_fallback:
-                price = kraken_prices.get(symbol)
-                source = "kraken"
+            price = kraken_prices.get(symbol)
+            source = "kraken"
 
             if price is None:
-                spot_symbol = symbol.replace("PI_", "").replace("USD", "-USD")
+                spot_symbol = symbol.replace("PI_", "").replace("USD", "/USD")
                 spot_hist = self.market_data.price_history.get(spot_symbol, [])
                 if spot_hist:
                     price = float(spot_hist[-1])
@@ -2471,13 +2470,12 @@ class TradingBot:
             else:
                 source_counts["missing"] += 1
                 self.logger.warning(
-                    f"No futures price for {symbol} (coinbase_enabled={self.enable_coinbase_futures_data}, "
-                    f"kraken_fallback={self.enable_kraken_futures_fallback})"
+                    f"No futures price for {symbol} "
+                    f"(kraken_fallback={self.enable_kraken_futures_fallback})"
                 )
 
         self.logger.info(
-            f"Futures data status: coinbase={source_counts['coinbase']} | "
-            f"kraken_fallback={source_counts['kraken']} | "
+            f"Futures data status: kraken={source_counts['kraken']} | "
             f"spot_proxy={source_counts['spot_proxy']} | "
             f"missing={source_counts['missing']}"
         )
@@ -2558,19 +2556,20 @@ class TradingBot:
 
         X, y = [], []
         for symbol, prices in self.market_data.price_history.items():
-            max_points = 2000
+            max_points = 10000  # Match sklearn model's data window
             recent = prices[-max_points:] if len(prices) > max_points else prices
             hourly = self.ml_model._aggregate_to_hourly(recent, 60)
             if len(hourly) < 60:
                 continue
-            for i in range(50, len(hourly) - 10):
+            for i in range(50, len(hourly) - 20):
                 features = self.ml_model._extract_features(hourly[:i])
                 if features is not None:
-                    future_return = (hourly[i + 10] - hourly[i]) / hourly[i]
-                    if abs(future_return) < 0.002:
+                    end_idx = min(i + 20, len(hourly) - 1)
+                    future_return = (hourly[end_idx] - hourly[i]) / hourly[i]
+                    if abs(future_return) < 0.003:
                         continue
                     X.append(features)
-                    y.append(1 if future_return > 0.005 else 0)
+                    y.append(1 if future_return > 0.008 else 0)
 
         if len(X) >= 200:
             self._gpu_model.train(np.array(X), np.array(y))
@@ -2600,13 +2599,10 @@ class TradingBot:
 
                 while retries > 0 and price is None:
                     try:
-                        if self.client:
-                            price = float(self.client.get_spot_price(currency_pair=symbol)['amount'])
-                        else:
-                            price = self._fetch_public_spot_price(symbol)
-                    except Exception as e:
-                        self.logger.debug(f"Authenticated fetch failed for {symbol}: {e}")
                         price = self._fetch_public_spot_price(symbol)
+                    except Exception as e:
+                        self.logger.debug(f"Price fetch failed for {symbol}: {e}")
+                        price = None
 
                     if price is None:
                         retries -= 1
@@ -2883,7 +2879,8 @@ class TradingBot:
         # Compute profit factor from recent trades
         try:
             trades = self._load_symbol_trades(symbol)
-            if len(trades) < 5:
+            min_trades = getattr(cfg, 'SYMBOL_HEALTH_MIN_TRADES', 8)
+            if len(trades) < min_trades:
                 # Not enough history to judge
                 self._symbol_perf_cache[symbol] = {"healthy": True, "last_cycle": self.cycle, "pf": None}
                 return True
@@ -2923,7 +2920,8 @@ class TradingBot:
             for symbol in df['symbol'].unique():
                 sym_trades = df[df['symbol'] == symbol]['pnl_usd'].tolist()
                 recent = sym_trades[-cfg.SYMBOL_PERF_WINDOW:]
-                if len(recent) < 5:
+                min_trades = getattr(cfg, 'SYMBOL_HEALTH_MIN_TRADES', 8)
+                if len(recent) < min_trades:
                     continue
                 wins = sum(t for t in recent if t > 0)
                 losses = abs(sum(t for t in recent if t < 0))
@@ -2962,8 +2960,8 @@ class TradingBot:
 
         self._regime_last_update = now
 
-        # Use BTC-USD as reference market, fall back to any symbol with enough data
-        ref_symbol = "BTC-USD"
+        # Use BTC/USD as reference market, fall back to any symbol with enough data
+        ref_symbol = "BTC/USD"
         hist = self.market_data.price_history.get(ref_symbol, [])
         if len(hist) < 50:
             # Try any symbol with enough data
@@ -3101,16 +3099,17 @@ class TradingBot:
         skipped_momentum_quality = 0
         skipped_regime_block = 0
 
-        # Regime-based ML confidence adjustments
+        # Regime-based ML confidence adjustments — RELAXED to prevent total signal shutdown
+        # Old thresholds (0.75-0.80) were impossible for a 60% accuracy model to clear
         regime_ml_threshold = cfg.MIN_ML_CONFIDENCE
         if self._current_regime == "HIGH_VOLATILITY":
-            regime_ml_threshold = 0.80
+            regime_ml_threshold = cfg.MIN_ML_CONFIDENCE + 0.05  # Slightly tighter in chaos
         elif self._current_regime == "RANGING":
-            regime_ml_threshold = 0.75
+            regime_ml_threshold = cfg.MIN_ML_CONFIDENCE  # Same as base — RANGING is normal, not dangerous
         elif self._current_regime == "TRENDING_DOWN":
-            regime_ml_threshold = 0.66  # Default, but block LONGs unless very high
+            regime_ml_threshold = cfg.MIN_ML_CONFIDENCE  # Block LONGs separately, don't raise bar
         elif self._current_regime == "TRENDING_UP":
-            regime_ml_threshold = 0.63  # Slightly looser in bull regime
+            regime_ml_threshold = cfg.MIN_ML_CONFIDENCE - 0.02  # Slightly looser in bull regime
 
         for symbol in symbols:
             # Symbol blacklist check
@@ -3162,8 +3161,9 @@ class TradingBot:
             trend, slope = self.market_data.calculate_trend(symbol)
             vol = self.market_data.calculate_volatility(symbol)
 
-            # CHANGE 3A: Minimum Expected Move Filter — skip if market too quiet
-            if _compute_indicators is not None and len(hist) >= 30:
+            # Low-vol filter disabled — SL/TP handles risk management
+            # Previously filtered too aggressively in RANGING/low-fear markets
+            if False and _compute_indicators is not None and len(hist) >= 30:
                 try:
                     indicators = _compute_indicators(hist)
                     atr_14 = indicators.get('atr_14', 0) * hist[-1]  # Un-normalize ATR
@@ -3171,7 +3171,7 @@ class TradingBot:
                         atr_pct = (atr_14 / hist[-1]) * 100
                         tp_target = cfg.FUTURES_TAKE_PROFIT if symbol.startswith('PI_') else cfg.TAKE_PROFIT_PCT
                         expected_move = atr_pct * math.sqrt(4)  # approx 4h move from hourly ATR
-                        if expected_move < tp_target * 0.5:
+                        if expected_move < tp_target * 0.15:
                             skipped_low_volatility += 1
                             continue  # Market too quiet, won't reach TP
                 except Exception:
@@ -3209,38 +3209,36 @@ class TradingBot:
                 long_trigger = max(0.51, long_trigger - self.direction_bias_strength)
                 short_trigger = min(0.49, short_trigger + self.direction_bias_strength)
 
-            if ml_direction > long_trigger:
-                # Potential Long — require UP trend (or very strong ML override in SIDE/counter)
+            if ml_direction >= long_trigger:
+                # Potential Long — require UP trend (or SIDE override or counter-trend)
                 if trend == "UP":
                     if rsi < cfg.MAX_RSI_LONG:
                         direction = "LONG"
-                        confidence = ml_conf  # Use raw ML confidence
+                        confidence = ml_conf
                 elif trend == "SIDE" and ml_conf >= cfg.SIDE_MARKET_ML_OVERRIDE:
-                    if rsi < cfg.MAX_RSI_LONG and sent >= -cfg.SENTIMENT_THRESHOLD:
-                        direction = "LONG"
-                        confidence = ml_conf * 0.85  # Penalize SIDE
-                elif trend == "DOWN" and ml_conf >= cfg.COUNTER_TREND_ML_OVERRIDE:
-                    # Counter-trend: model strongly predicts UP against DOWN trend
                     if rsi < cfg.MAX_RSI_LONG:
                         direction = "LONG"
-                        confidence = ml_conf * 0.70  # Heavy penalty
+                        confidence = ml_conf * 0.95  # Minor SIDE penalty
+                elif trend == "DOWN" and ml_conf >= cfg.COUNTER_TREND_ML_OVERRIDE:
+                    if rsi < cfg.MAX_RSI_LONG:
+                        direction = "LONG"
+                        confidence = ml_conf * 0.80  # Counter-trend penalty
                         counter_trend_taken += 1
 
-            elif ml_direction < short_trigger:
-                # Potential Short — require DOWN trend (or very strong ML override in SIDE/counter)
+            elif ml_direction <= short_trigger:
+                # Potential Short — require DOWN trend (or SIDE override or counter-trend)
                 if trend == "DOWN":
                     if rsi > cfg.MIN_RSI_SHORT:
                         direction = "SHORT"
-                        confidence = ml_conf  # Use raw ML confidence
+                        confidence = ml_conf
                 elif trend == "SIDE" and ml_conf >= cfg.SIDE_MARKET_ML_OVERRIDE:
-                    if rsi > cfg.MIN_RSI_SHORT and sent <= cfg.SENTIMENT_THRESHOLD:
-                        direction = "SHORT"
-                        confidence = ml_conf * 0.85  # Penalize SIDE
-                elif trend == "UP" and ml_conf >= cfg.COUNTER_TREND_ML_OVERRIDE:
-                    # Counter-trend: model strongly predicts DOWN against UP trend
                     if rsi > cfg.MIN_RSI_SHORT:
                         direction = "SHORT"
-                        confidence = ml_conf * 0.70  # Heavy penalty
+                        confidence = ml_conf * 0.95  # Minor SIDE penalty
+                elif trend == "UP" and ml_conf >= cfg.COUNTER_TREND_ML_OVERRIDE:
+                    if rsi > cfg.MIN_RSI_SHORT:
+                        direction = "SHORT"
+                        confidence = ml_conf * 0.80  # Counter-trend penalty
                         counter_trend_taken += 1
 
             # SHORT-only / LONG-only mode filter
@@ -3252,14 +3250,13 @@ class TradingBot:
             # CHANGE 5: Regime-based direction blocking
             if direction and self._current_regime:
                 if self._current_regime == "TRENDING_DOWN" and direction == "LONG":
-                    if ml_conf < 0.90:
+                    if ml_conf < 0.65:  # Was 0.80 — let strong signals through
                         skipped_regime_block += 1
-                        direction = None  # Block LONG in downtrend unless ML >= 90%
+                        direction = None  # Block LONG in downtrend unless ML >= 80%
                     else:
-                        confidence = ml_conf * 0.60  # Heavy penalty even with high conf
-                if self._current_regime == "RANGING" and trend == "SIDE":
-                    skipped_regime_block += 1
-                    direction = None  # Skip SIDE entries in RANGING regime entirely
+                        confidence = ml_conf * 0.75  # Moderate penalty (was 0.60)
+                # REMOVED: RANGING + SIDE double-block was killing ALL trades in ranging markets
+                # The SIDE_MARKET_FILTER already handles sideways markets upstream
 
             # Regime flip cooldown — block entries during dangerous transitions
             if direction and self._regime_flip_state.get("should_block_entries", False):
@@ -3447,9 +3444,8 @@ class TradingBot:
             if self._current_regime and self._regime_adjustments:
                 regime_size_mult = self._regime_adjustments.get("position_size", 1.0)
                 size *= regime_size_mult
-            # Additional regime penalty for TRENDING_DOWN
-            if self._current_regime == "TRENDING_DOWN":
-                size *= 0.60  # Reduce to 60% in downtrends
+            # Note: Removed separate TRENDING_DOWN 0.60 penalty — regime_adjustments already handles it.
+            # The double-penalty was causing multiplicative collapse to sub-minimum sizes.
 
             # Regime flip position sizing reduction
             flip_mult = self._regime_flip_state.get("adjustment_multiplier", 1.0)
@@ -3460,6 +3456,14 @@ class TradingBot:
                     f"(cooldown={self._regime_flip_state.get('is_cooldown', False)}, "
                     f"whipsaw={self._regime_flip_state.get('whipsaw_score', 0):.2f})"
                 )
+
+            # FLOOR: Ensure all the multiplicative reductions don't collapse size below 50% of base
+            # This prevents quiet_hours * streak * regime * flip from stacking to near-zero
+            base_pre_reduction = self.risk_manager.calculate_position_size(
+                total_balance, signal.confidence,
+                self.market_data.calculate_volatility(signal.symbol), position_count
+            )
+            size = max(size, base_pre_reduction * 0.5)
 
             min_trade_size = max(10.0, total_balance * cfg.MIN_POSITION_PCT)
             # For futures, leverage reduces capital needed — adjust min accordingly

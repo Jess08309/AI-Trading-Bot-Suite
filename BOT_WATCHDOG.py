@@ -36,8 +36,8 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-SCRIPT_DIR = Path(__file__).resolve().parent            # c:\Master Chess
-BOT_DIR = Path(r"D:\042021\CryptoBot")
+SCRIPT_DIR = Path(__file__).resolve().parent            # c:\Bot
+BOT_DIR = Path(r"C:\Bot")
 PYTHON_EXE = BOT_DIR / ".venv" / "Scripts" / "python.exe"
 BOT_MAIN = BOT_DIR / "cryptotrades" / "main.py"
 STATE_DIR = BOT_DIR / "data" / "state"
@@ -110,6 +110,7 @@ def check_process_alive() -> bool:
         result = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq python.exe", "/FO", "CSV", "/NH"],
             capture_output=True, text=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         for line in result.stdout.strip().splitlines():
             if "python.exe" in line.lower():
@@ -122,6 +123,7 @@ def check_process_alive() -> bool:
                             ["wmic", "process", "where", f"ProcessId={pid}",
                              "get", "CommandLine", "/value"],
                             capture_output=True, text=True, timeout=10,
+                            creationflags=subprocess.CREATE_NO_WINDOW,
                         )
                         if "cryptotrades" in cmd_result.stdout:
                             return True
@@ -142,6 +144,7 @@ def check_process_alive_simple() -> tuple[bool, int | None]:
              "Where-Object { $_.Path -like '*CryptoBot*.venv*python.exe' } | "
              "Select-Object -First 1 -ExpandProperty Id"],
             capture_output=True, text=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         pid_str = result.stdout.strip()
         if pid_str and pid_str.isdigit():

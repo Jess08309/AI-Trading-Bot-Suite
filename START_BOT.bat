@@ -5,7 +5,7 @@ echo ========================================
 echo   Master Chess Bot Launcher
 echo ========================================
 
-set "BOT_DIR=D:\042021\CryptoBot"
+set "BOT_DIR=C:\Bot"
 set "PYTHON_EXE=%BOT_DIR%\.venv\Scripts\python.exe"
 set "BOT_MAIN=%BOT_DIR%\cryptotrades\main.py"
 
@@ -26,7 +26,7 @@ if not defined ENABLE_FUTURES set "ENABLE_FUTURES=true"
 if not defined ENABLE_COINBASE_FUTURES_DATA set "ENABLE_COINBASE_FUTURES_DATA=true"
 if not defined ENABLE_KRAKEN_FUTURES_FALLBACK set "ENABLE_KRAKEN_FUTURES_FALLBACK=true"
 if not defined DIRECTION_BIAS set "DIRECTION_BIAS=short_lean"
-if not defined DIRECTION_BIAS_STRENGTH set "DIRECTION_BIAS_STRENGTH=0.06"
+if not defined DIRECTION_BIAS_STRENGTH set "DIRECTION_BIAS_STRENGTH=0.01"
 if not defined RL_SHADOW_MODE set "RL_SHADOW_MODE=true"
 if not defined RL_LIVE_SIZE_CONTROL set "RL_LIVE_SIZE_CONTROL=false"
 if not defined RL_LIVE_SIZE_MIN_MULT set "RL_LIVE_SIZE_MIN_MULT=0.5"

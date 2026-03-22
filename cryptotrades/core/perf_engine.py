@@ -34,8 +34,10 @@ class ConcurrentPriceFetcher:
 
     Uses requests.Session for HTTP/1.1 keep-alive connection pooling,
     reducing TCP handshake overhead to near-zero for repeated calls to
-    the same Coinbase/Kraken endpoints.
+    the same Alpaca/Kraken endpoints.
     """
+
+    ALPACA_DATA_URL = "https://data.alpaca.markets/v1beta3/crypto/us"
 
     def __init__(self, max_workers: int = 10, timeout: float = 8.0):
         self.max_workers = max_workers
@@ -49,6 +51,14 @@ class ConcurrentPriceFetcher:
         )
         self._session.mount("https://", adapter)
         self._session.mount("http://", adapter)
+        # Add Alpaca API headers
+        api_key = os.getenv("ALPACA_API_KEY", "")
+        api_secret = os.getenv("ALPACA_API_SECRET", "")
+        if api_key and api_secret:
+            self._session.headers.update({
+                "APCA-API-KEY-ID": api_key,
+                "APCA-API-SECRET-KEY": api_secret,
+            })
         self._fetch_count = 0
         self._last_batch_time = 0.0
         logger.info(
@@ -70,16 +80,7 @@ class ConcurrentPriceFetcher:
         def _fetch_one(symbol: str) -> Tuple[str, Optional[float]]:
             """Fetch a single symbol with retry logic."""
             for attempt in range(retries):
-                price = None
-                try:
-                    if client:
-                        price = float(
-                            client.get_spot_price(currency_pair=symbol)["amount"]
-                        )
-                    else:
-                        price = self._public_spot_price(symbol)
-                except Exception:
-                    price = self._public_spot_price(symbol)
+                price = self._public_spot_price(symbol)
 
                 if price is not None:
                     return (symbol, price)
@@ -112,12 +113,16 @@ class ConcurrentPriceFetcher:
         return results
 
     def _public_spot_price(self, symbol: str) -> Optional[float]:
-        """Fetch via Coinbase public endpoint using pooled session."""
+        """Fetch via Alpaca crypto data endpoint using pooled session."""
         try:
-            url = f"https://api.coinbase.com/v2/prices/{symbol}/spot"
+            url = f"{self.ALPACA_DATA_URL}/latest/trades?symbols={symbol}"
             resp = self._session.get(url, timeout=self.timeout)
             resp.raise_for_status()
-            return float(resp.json()["data"]["amount"])
+            trades = resp.json().get("trades", {})
+            trade_data = trades.get(symbol)
+            if trade_data and "p" in trade_data:
+                return float(trade_data["p"])
+            return None
         except Exception:
             return None
 

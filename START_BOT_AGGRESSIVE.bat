@@ -16,7 +16,7 @@ set "RL_LIVE_SIZE_CONTROL=false"
 set "RL_LIVE_SIZE_MIN_MULT=0.5"
 set "RL_LIVE_SIZE_MAX_MULT=2.0"
 set "USE_LOCKED_PROFILE=true"
-set "LOCKED_PROFILE_PATH=D:\042021\CryptoBot\data\state\locked_profile.json"
+set "LOCKED_PROFILE_PATH=C:\Bot\data\state\locked_profile.json"
 set "LOCKED_PROFILE_ALLOW_ENV_OVERRIDES=true"
 
 rem === Speed: trade every cycle (1 min) but quality gates are enforced ===
@@ -26,7 +26,7 @@ set "TRADE_CYCLE_INTERVAL_OVERRIDE=1"
 set "MODEL_RETRAIN_HOURS_OVERRIDE=2"
 
 rem === Quality gates: HIGHER bars than before ===
-set "MIN_ML_CONFIDENCE_OVERRIDE=0.62"
+set "MIN_ML_CONFIDENCE_OVERRIDE=0.60"
 set "MIN_ENSEMBLE_SCORE_OVERRIDE=0.58"
 set "SIDE_MARKET_FILTER_OVERRIDE=true"
 
@@ -37,11 +37,11 @@ set "CB_MAX_DRAWDOWN_PCT_OVERRIDE=-10"
 
 rem === Position limits ===
 set "MAX_POSITION_PCT_OVERRIDE=0.15"
-set "MAX_POSITIONS_SPOT_OVERRIDE=50"
-set "MAX_POSITIONS_FUTURES_OVERRIDE=30"
+set "MAX_POSITIONS_SPOT_OVERRIDE=12"
+set "MAX_POSITIONS_FUTURES_OVERRIDE=8"
 set "MAX_POSITIONS_PER_SYMBOL_SPOT_OVERRIDE=2"
 set "MAX_POSITIONS_PER_SYMBOL_FUTURES_OVERRIDE=2"
-set "MAX_CORRELATION_OVERRIDE=0.85"
+set "MAX_CORRELATION_OVERRIDE=0.70"
 set "FUTURES_LEVERAGE_OVERRIDE=2"
 
 rem === Risk / reward: balanced stops ===
@@ -61,6 +61,6 @@ echo Futures leverage: %FUTURES_LEVERAGE_OVERRIDE%x ^| Symbol pause after: %SYMB
 echo Force retrain: %FORCE_MODEL_RETRAIN_ON_START% ^| Locked profile: %USE_LOCKED_PROFILE%
 echo.
 
-call "C:\Master Chess\START_BOT.bat"
+call "C:\Bot\START_BOT.bat"
 
 endlocal
