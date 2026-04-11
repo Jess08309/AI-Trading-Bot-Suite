@@ -83,6 +83,64 @@ The most sophisticated bot in the suite. Trades both spot and perpetual futures 
 ### Tech Stack
 `Python 3.11` · `scikit-learn` · `LangGraph` · `GPT-4o-mini` · `NumPy` · `Alpaca Crypto API`
 
+### 🧠 The Multi-Agent AI System (LangGraph)
+
+CryptoBot includes a full **multi-agent AI system** built on [LangGraph](https://github.com/langchain-ai/langgraph) — a team of 4 specialized GPT-4o-mini agents that validate every trade signal before execution:
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  ML Signal Generated                 │
+│              "BUY BTC/USD, confidence 0.72"          │
+└──────────────────────┬──────────────────────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │     LangGraph StateGraph     │
+        │      (Parallel → Sequential) │
+        └──────┬───────────────┬───────┘
+               ▼               ▼
+   ┌──────────────────┐ ┌──────────────────┐
+   │ Technical Analyst │ │ Sentiment Analyst│
+   │                   │ │                  │
+   │ Reviews indicators│ │ Scans crypto news│
+   │ Confirms signal   │ │ & social feeds   │
+   │ direction matches │ │ for directional  │
+   │ chart structure   │ │ bias / red flags  │
+   └────────┬─────────┘ └────────┬─────────┘
+            └────────┬───────────┘
+                     ▼
+          ┌──────────────────┐
+          │   Risk Manager   │
+          │                  │
+          │ Checks portfolio │
+          │ exposure, sizing │
+          │ & correlation    │
+          └────────┬─────────┘
+                   ▼
+          ┌──────────────────┐
+          │   Orchestrator   │
+          │                  │
+          │ Combines all 3   │
+          │ opinions → final │
+          │ GO / NO-GO       │
+          └──────────────────┘
+```
+
+| Agent | Model | Purpose |
+|-------|-------|---------|
+| **Technical Analyst** | GPT-4o-mini | Validates that indicators (RSI, MACD, Bollinger, ATR) support the ML signal direction |
+| **Sentiment Analyst** | GPT-4o-mini | Scans crypto news and social media for sentiment that could override technical signals |
+| **Risk Manager** | GPT-4o-mini | Reviews portfolio exposure, position correlation, and sizing before approving |
+| **Orchestrator** | GPT-4o-mini | Weighs all three opinions and makes the final trade/no-trade decision with a confidence score |
+
+**Why only CryptoBot has this (not the options bots):**
+- CryptoBot trades **24/7 with 30-60 trades per day** — enough volume to justify AI validation on every signal
+- Options bots trade **2-5 times per day** during market hours. Their edge comes from math (time decay, fixed-risk spreads), not directional prediction — an AI committee adds cost without proportional benefit
+- At low trade frequency, the ML model + meta-learner + rule-based scoring already filters well enough
+
+**Current status: DISABLED** — The agent system was costing **~$37/day (~$1,100/month)** in OpenAI API calls. Every 60-second trade cycle hit the API with 4 agent calls, 24/7 — that's 1,440 cycles × 4 agents × ~500-1000 tokens each = millions of tokens per day. On a paper trading account making ~$18/week, spending $259/week on API calls didn't make sense.
+
+The code is fully intact in `CryptoBot/agents/` (12 files), and `memory.json` continues recording trade outcomes for future training. To re-enable: set `AGENT_ENABLED=true` in the config — worth it once live trading capital means a single bad trade could cost more than $37.
+
 ---
 
 ## 💰 PutSeller — The Income Machine (5,400+ lines)
