@@ -317,13 +317,13 @@ This project started in January 2026 as a single crypto trading script and evolv
 
 ### The Team
 
-This entire codebase was built through a collaboration between a human developer ([Jess08309](https://github.com/Jess08309)), **Claude Opus Copilot** (primary coding agent — architecture, implementation, debugging, deployment), and **ChatGPT** (strategic advisor — code review, root cause analysis, second opinions on fixes). The workflow looked like this:
+This entire codebase was built through a collaboration between a human developer ([Jess08309](https://github.com/Jess08309)), **Claude Opus** (primary coding agent — architecture, implementation, debugging, deployment), and **ChatGPT** (strategic advisor — code review, root cause analysis, second opinions on fixes). The workflow looked like this:
 
-1. **Claude Opus Copilot** writes the code, runs the audits, and deploys to production
+1. **Claude Opus** writes the code, runs the audits, and deploys to production
 2. **ChatGPT** reviews the findings, classifies severity, and sanity-checks the fix approach
 3. **Human** makes the final call, tests in paper trading, and decides what ships
 
-This three-way verification process caught bugs that no single agent would have found alone. When Claude Opus Copilot audited the codebase and found 27 issues, ChatGPT independently classified 16 as "fix now" and 11 as "wait for data" — preventing both under-fixing and over-engineering.
+This three-way verification process caught bugs that no single agent would have found alone. When Claude Opus audited the codebase and found 27 issues, ChatGPT independently classified 16 as "fix now" and 11 as "wait for data" — preventing both under-fixing and over-engineering.
 
 ### The Early Days (January–February)
 
@@ -383,9 +383,9 @@ The system went from "nothing works" to "everything trades" to "trades profitabl
 
 Every fix followed the same pattern:
 
-1. **Audit** — Claude Opus Copilot scans the full codebase, cross-referencing logs, state files, and trade CSVs
+1. **Audit** — Claude Opus scans the full codebase, cross-referencing logs, state files, and trade CSVs
 2. **Triage** — ChatGPT reviews the findings and classifies: *fix now (code bug)* vs. *wait for data (parameter tuning)*
-3. **Implement** — Claude Opus Copilot writes the fix with minimal scope — no refactoring, no feature creep
+3. **Implement** — Claude Opus writes the fix with minimal scope — no refactoring, no feature creep
 4. **Deploy** — SCP the fixed files to Oracle Cloud, restart the systemd service, verify clean startup in `journalctl`
 5. **Monitor** — Wait for live cycles to confirm the fix works under real market conditions
 
@@ -419,7 +419,7 @@ This is a **paper trading** system built for educational and research purposes. 
 
 ## 👤 Author
 
-Built by [Jess08309](https://github.com/Jess08309) with **Claude Opus Copilot** and **ChatGPT** — a human-AI collaboration exploring the intersection of machine learning, autonomous agents, and algorithmic trading.
+Built by [Jess08309](https://github.com/Jess08309) with **Claude Opus** and **ChatGPT** — a human-AI collaboration exploring the intersection of machine learning, autonomous agents, and algorithmic trading.
 
 ---
 
