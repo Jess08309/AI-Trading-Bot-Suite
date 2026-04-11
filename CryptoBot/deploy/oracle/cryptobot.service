@@ -1,0 +1,65 @@
+[Unit]
+Description=CryptoBot - Spot + Futures Crypto Trading (24/7)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botuser
+Group=botuser
+WorkingDirectory=/home/botuser/CryptoBot
+ExecStart=/home/botuser/CryptoBot/.venv/bin/python -u cryptotrades/main.py
+
+# Aggressive profile environment variables
+Environment=ENABLE_FUTURES=true
+Environment=ENABLE_COINBASE_FUTURES_DATA=true
+Environment=ENABLE_KRAKEN_FUTURES_FALLBACK=true
+Environment=DIRECTION_BIAS=neutral
+Environment=DIRECTION_BIAS_STRENGTH=0.02
+Environment=RL_SHADOW_MODE=false
+Environment=RL_LIVE_SIZE_CONTROL=false
+Environment=RL_LIVE_SIZE_MIN_MULT=0.5
+Environment=RL_LIVE_SIZE_MAX_MULT=2.0
+Environment=USE_LOCKED_PROFILE=true
+Environment=LOCKED_PROFILE_PATH=/home/botuser/CryptoBot/data/state/locked_profile.json
+Environment=LOCKED_PROFILE_ALLOW_ENV_OVERRIDES=true
+Environment=AGGRESSIVE_FUTURES_BURST=true
+Environment=FORCE_MODEL_RETRAIN_ON_START=true
+Environment=TRADE_CYCLE_INTERVAL_OVERRIDE=1
+Environment=MODEL_RETRAIN_HOURS_OVERRIDE=2
+Environment=MIN_ML_CONFIDENCE_OVERRIDE=0.58
+Environment=MIN_ENSEMBLE_SCORE_OVERRIDE=0.58
+Environment=SIDE_MARKET_FILTER_OVERRIDE=true
+Environment=CB_MAX_CONSECUTIVE_LOSSES_OVERRIDE=5
+Environment=CB_DAILY_LOSS_LIMIT_PCT_OVERRIDE=-5
+Environment=CB_MAX_DRAWDOWN_PCT_OVERRIDE=-10
+Environment=MAX_POSITION_PCT_OVERRIDE=0.12
+Environment=MAX_POSITIONS_SPOT_OVERRIDE=12
+Environment=MAX_POSITIONS_FUTURES_OVERRIDE=8
+Environment=MAX_POSITIONS_PER_SYMBOL_SPOT_OVERRIDE=2
+Environment=MAX_POSITIONS_PER_SYMBOL_FUTURES_OVERRIDE=2
+Environment=MAX_CORRELATION_OVERRIDE=0.70
+Environment=FUTURES_LEVERAGE_OVERRIDE=2
+Environment=STOP_LOSS_PCT_OVERRIDE=-1.5
+Environment=TAKE_PROFIT_PCT_OVERRIDE=1.5
+Environment=TRAILING_STOP_PCT_OVERRIDE=0.8
+Environment=TRAILING_ACTIVATE_PCT_OVERRIDE=0.6
+Environment=MAX_HOLD_HOURS_SPOT_OVERRIDE=8.0
+Environment=MAX_HOLD_HOURS_FUTURES_OVERRIDE=5.0
+Environment=FUTURES_STOP_LOSS_OVERRIDE=-2.0
+Environment=FUTURES_TAKE_PROFIT_OVERRIDE=2.0
+Environment=SYMBOL_PAUSE_CONSECUTIVE_LOSSES_OVERRIDE=4
+
+# Restart policy
+Restart=always
+RestartSec=30
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cryptobot
+
+[Install]
+WantedBy=multi-user.target

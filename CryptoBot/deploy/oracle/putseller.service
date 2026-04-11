@@ -1,0 +1,25 @@
+[Unit]
+Description=PutSeller - Bull Put Credit Spreads (35% allocation)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botuser
+Group=botuser
+WorkingDirectory=/home/botuser/PutSeller
+ExecStart=/home/botuser/PutSeller/.venv/bin/python -u main.py
+
+# Restart policy
+Restart=always
+RestartSec=30
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=putseller
+
+[Install]
+WantedBy=multi-user.target

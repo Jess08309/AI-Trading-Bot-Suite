@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# API Keys & Secrets
+.env
+.env.*
+*.pem
+cdp_api_key.json
+alpaca_keys.json
+
+# Logs
+logs/
+*.log
+
+# Data (state + models)
+data/state/
+data/trades.csv
+models/*.joblib
+
+# Temp
+*.tmp
+*.bak
+*.backup
+
+# VSCode
+.vscode/*
+!.vscode/settings.json
+
+# OS
+Thumbs.db
+.DS_Store

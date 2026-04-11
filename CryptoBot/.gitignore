@@ -1,0 +1,99 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Trading Bot Data (Sensitive)
+cdp_api_key.json
+coinbase API.txt
+.env
+.env.*
+*.log
+cryptotrades/data/state/
+
+# API Keys & Secrets
+alpaca_keys.json
+*.pem
+personal_key.txt
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+*_temp.py
+trading_engine_temp.py
+nohup.out
+startup_error.txt
+startup_out.txt
+test_results.txt
+usage_stats.txt
+wf_*.txt
+
+# AI Model Files (too large for git)
+trade_model.joblib
+models/*.joblib
+data/models/*.joblib
+data/models/market_model.joblib
+*.pt
+
+# Large data files
+data/historical/
+data/backtest/*.txt
+data/backtest/*.csv
+data/state/
+data/history/
+data/trades.csv
+tools/backtests/data/minute_prices.csv
+tools/backtests/data/hourly_prices.csv
+tools/backtests/data/state/
+
+# Foundation backup models
+_FOUNDATION_V5_*/models/*.joblib
+_FOUNDATION_V5_*/models/*.pt
+
+# Logs
+logs/
+*.log
+
+# VSCode
+.vscode/*
+!.vscode/settings.json
+!.copilot-instructions.md
+
+# Local backup archives
+_BACKUPS/*.zip
+
+# Large local installer artifacts
+_ARCHIVE/installers/*.exe
+
+# Android Studio (exclude completely)
+.gradle/
+.idea/
+local.properties
+*.apk
+*.aab
+*.iml
+app/build/
+build/
+gradle/
+gradlew
+gradlew.bat
+
+# OS files
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Test state
+test_state/

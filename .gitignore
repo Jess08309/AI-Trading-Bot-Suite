@@ -1,0 +1,67 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# ===== Virtual Environments =====
+.venv/
+venv/
+ENV/
+
+# ===== Secrets & Config =====
+.env
+cdp_api_key.json
+
+# ===== Logs =====
+logs/
+*.log
+nohup.out
+bot.log
+
+# ===== Runtime State =====
+data/state/
+data/agent_runs/
+data/trades.csv
+data/history/
+data/historical/
+
+# ===== ML Models (large binaries) =====
+models/
+data/models/
+*.joblib
+*.pt
+
+# ===== Backtest & Temp Output =====
+data/backtest/
+tools/backtests/
+backtest_*.txt
+sweep_*.txt
+tune_results.txt
+grades_output.txt
+temp_*
+wf_*.txt
+train_1min.log
+
+# ===== Reports (generated) =====
+reports/
+
+# ===== Process Artifacts =====
+dash_stderr.txt
+dash_stdout.txt
+startup_*.txt
+
+# ===== Archives & Snapshots =====
+_ARCHIVE/
+_BACKUPS/
+_FOUNDATION_V5_*/
+*.zip
+
+# ===== Test State =====
+test_state/
+
+# ===== OS =====
+Thumbs.db
+Desktop.ini
+.DS_Store

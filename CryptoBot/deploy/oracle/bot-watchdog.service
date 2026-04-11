@@ -1,0 +1,6 @@
+[Unit]
+Description=Bot Watchdog — ensure all trading bots stay alive
+
+[Service]
+Type=oneshot
+ExecStart=/home/botuser/deploy/bot-watchdog.sh

@@ -1,0 +1,13 @@
+# === Core Dependencies (required) ===
+python-dotenv>=1.0.0
+requests>=2.31.0
+numpy>=1.24.0
+pandas>=2.0.0
+scikit-learn>=1.3.0
+joblib>=1.3.0
+websocket-client>=1.6.0
+
+# === Optional: Enhanced features ===
+# torch — RL agent DQN + GPU neural net (falls back to Q-table/CPU without it)
+# transformers — HuggingFace NLP sentiment (falls back to keyword matching)
+# feedparser — RSS news feed parsing

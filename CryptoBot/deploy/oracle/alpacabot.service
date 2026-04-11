@@ -1,0 +1,25 @@
+[Unit]
+Description=AlpacaBot - Options Scalping (currently dormant, 0% allocation)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botuser
+Group=botuser
+WorkingDirectory=/home/botuser/AlpacaBot
+ExecStart=/home/botuser/AlpacaBot/.venv/bin/python -u main.py
+
+# Restart policy
+Restart=always
+RestartSec=30
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alpacabot
+
+[Install]
+WantedBy=multi-user.target
