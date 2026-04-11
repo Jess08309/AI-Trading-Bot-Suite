@@ -336,43 +336,38 @@ Nothing worked at first. That's not an exaggeration:
 
 But every failure taught us something, and every fix made the system measurably better.
 
-### The Fix Cycles — Getting Better Every Round
+### Hundreds of Fix Cycles
 
-This wasn't a "fail then suddenly succeed" story. It was dozens of iterations, each one solving a specific problem and unlocking the next level of performance.
+This wasn't a "five-round" process. It was **hundreds of individual debug-fix-deploy-test cycles** over four months — sometimes a dozen in a single day. Tweak a threshold, deploy, watch the logs, see what breaks next, fix that, deploy again. The 60+ bug fixes in the codebase don't count the parameter adjustments, the config changes, the log format tweaks, the dozens of times a "fix" introduced a new problem that needed its own fix.
 
-**Round 1 (Early March)** — *Getting the bots to actually trade*
-- Loosened CryptoBot's entry filters (MIN_ML_CONFIDENCE 0.52, MIN_ENSEMBLE 0.50) so it could actually open positions
-- Fixed CallBuyer's critical crash: `contract_symbol=` → `option_symbol=` in the buy/sell functions (was throwing errors on every attempt)
-- Fixed CallBuyer's state file collision where RiskManager was overwriting the engine's `bot_state.json`
-- **Result**: All 4 bots running and opening trades for the first time
+Some changes took 5 minutes. Some took an entire weekend of tracing through log files, state files, API responses, and trade CSVs to find the root cause. The MLEG double-execution bug alone required building two recovery tools, a position rebuilder, and rewriting the close logic — then testing it across multiple market sessions to confirm it actually worked.
 
-**Round 2 (Mid-March)** — *Stopping the bleeding*
-- Discovered PutSeller was consuming 100% of buying power ($318 remaining from $53K) — allocation wasn't loading from `.env` because Python read the config at class definition time, before dotenv ran
-- Added early dotenv loading to both PutSeller and CallBuyer's `config.py`
-- Built leveraged ETF guardrails for PutSeller (30 symbols get max 1 contract, 1.5x wider OTM)
-- CryptoBot HOLD_DECAY was killing 40% of all exits prematurely — tuned threshold from 0.70 to 0.90
-- **Result**: PutSeller went from hemorrhaging capital to running within its 35% allocation. CryptoBot holding trades long enough to profit
+Here are a few landmark moments from hundreds of iterations, grouped roughly by phase:
 
-**Round 3 (Late March)** — *Fixing the hard bugs*
-- **PutSeller's double-execution disaster**: MLEG close orders timed out but filled later, then the individual-leg fallback also executed — flipping credit spreads into debit spreads. 14 stop-losses fired in 8 minutes, losing $2,488. Fixed by canceling MLEG before fallback and adding proper `position_intent` to prevent reversals
-- Built position recovery tools and a reversed-position closer to clean up the damage (16 credit spreads recovered, 9 reversed debits closed)
-- Fixed a PowerShell BOM character (3 invisible bytes: `EF BB BF`) that silently corrupted JSON state files
-- CallBuyer's `get_bars(days=60)` only returned ~41 trading days, below the 50-bar minimum — every symbol silently returned None. Changed to `days=90`. Immediately found 33 candidates and opened 2 trades
-- **Result**: PutSeller and CallBuyer both actively opening and closing trades correctly
+**January–February: Getting off the ground**
 
-**Round 4 (Early April)** — *ML model and performance tuning*
-- CryptoBot post-overhaul: went from net negative to **+$18.40 on 62 trades** — first sustained profitability
-- HOLD_DECAY further tuned (threshold 0.90→0.75, pnl_pct 0.25→0.40) after analysis showed it was still the #1 exit reason at 627 trades
-- Extended max hold times (spot 2.5h→4.0h, futures 1.5h→3.0h) so positions had room to develop
-- CallBuyer's meta-learner confidence floor was blocking all warmup trades — lowered from 0.40 to 0.25
+The first two months were mostly building — writing trading engines, ML models, API clients, risk managers, meta-learners, and the indicator suites. But every component needed its own rounds of debugging before it could even talk to the others. CryptoBot went through 9 consecutive iterations just on entry filter tuning before it could open its first trade. CallBuyer's buy/sell functions crashed on launch because of a wrong parameter name (`contract_symbol` vs `option_symbol`). AlpacaBot's 4-layer ensemble was the most complex architecture but also had the most integration bugs — state files overwriting each other, warmup functions calling methods that didn't exist.
 
-**Round 5 (April 10–11)** — *Full codebase deep audit*
-- Three parallel code audits found 27 issues across all bots. ChatGPT classified 16 as "fix now" and 11 as "wait for data"
-- Fixed CryptoBot's futures history merge that was duplicating data, added atomic state file writes, plugged NaN feature leaks into ML training
-- Fixed PutSeller's call-side scan that was missing earnings checks (could have opened spreads right before earnings)
-- Fixed CallBuyer's bid=0 fallback that referenced a nonexistent "last" key — would have crashed on any illiquid option
-- Deployed all 16 fixes to Oracle Cloud, restarted all services clean
-- **Result**: All 3 bots running error-free with the cleanest codebase they've ever had
+**March: The breaking-and-fixing month**
+
+March was where the real debugging happened. Every day was a new discovery:
+
+- PutSeller's allocation wasn't loading from `.env` → fixed dotenv load order → then discovered the meta-learner was loading stale state that overrode streak counts → rewrote `_load_state()` → then found MLEG orders were double-executing → built cancel-before-fallback logic → then realized `position_intent` was missing from the SDK calls → rewrote close logic with raw HTTP → then 14 stop-losses cascaded in 8 minutes → built position recovery tools → then a PowerShell BOM character corrupted the recovered state file → switched to BOM-free UTF-8 writes. That was one bot over about two weeks.
+- CryptoBot's watchdog was spawning zombie processes → fixed PID detection → then found the port lock was letting zombies rebind → removed `SO_REUSEADDR` → then HOLD_DECAY was exiting 40% of trades prematurely → tuned threshold → then tuned again → then tuned a third time → then discovered it was still the #1 exit reason after 627 trades → tuned the PnL floor → then extended max hold times → then found the ML model had a feature mismatch after pruning → added retrain trigger.
+- CallBuyer sat at zero trades for 552 cycles. Found the RSI cap. Raised it. Still no trades. Found `get_bars(days=60)` was returning below the 50-bar minimum. Fixed it. Immediately found 33 candidates. Opened 2 trades. Then the meta-learner blocked all subsequent trades because the confidence floor was too high during warmup. Lowered it. Then the bid fallback referenced a key that didn't exist. Fixed it. Every fix unlocked the next bottleneck.
+
+**Late March–Early April: Stabilization**
+
+This was the phase where things started actually working — but "working" still meant daily monitoring and adjustments:
+
+- CryptoBot's post-overhaul run: 62 trades, +$18.40 — first sustained profitability after 1,300+ trades in the red
+- Capital allocation across bots: went from 115% (over-allocated) down to properly coordinated 35%+15%+0% with PORTFOLIO_MAX_PCT bumped to 50% so they'd stop blocking each other
+- Direction mode, symbol health filters, regime detection thresholds, correlation limits — all tuned through repeated cycles of "deploy → watch 50 trades → analyze → adjust"
+- Built the full multi-agent AI system (12 files, LangGraph DAG, 4 GPT agents), got it working, then optimized cost from $37/day down to $0.27/day, then disabled it to let the base system prove itself first
+
+**April 10–11: The deep audit**
+
+Three parallel code audits found 27 remaining issues. ChatGPT classified 16 as "fix now." All 16 were patched and deployed in a single session — futures data deduplication, atomic state writes, NaN feature leaks, earnings check gaps, timezone bugs, position_intent on API calls. The cleanest the codebase has ever been.
 
 ### Where It Stands Now
 
@@ -407,12 +402,12 @@ The discipline of separating "broken code" from "needs tuning" was critical. Aft
 | **Total** | **234** | **53,903** |
 
 - **169 Python modules** across ML models, trading engines, risk managers, meta-learners, API clients, and utility libraries
-- **60+ bugs found and fixed** across 5 major audit cycles
-- **5 rounds of iterative improvement** from "can't open a trade" to "profitable and stable"
+- **60+ bugs found and fixed** across hundreds of debug-fix-deploy-test cycles
+- **Hundreds of iterations** — parameter tuning, config changes, log analysis, threshold adjustments, deploy-and-watch cycles over 4 months
 - **12-file multi-agent AI system** built on LangGraph with cost optimizations reducing API spend from $37/day to $0.27/day
 - **Deployed on Oracle Cloud** with systemd services, automatic restart, and watchdog monitoring
 
-Four months of building, breaking, fixing, improving, and rebuilding — each iteration better than the last.
+Four months. Hundreds of cycles. Every iteration better than the last.
 
 ---
 
