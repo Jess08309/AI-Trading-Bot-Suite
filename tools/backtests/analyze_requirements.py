@@ -1,4 +1,4 @@
-﻿# Emergency fix: Create a minimal working trading_engine.py that imports correctly
+# Emergency fix: Create a minimal working trading_engine.py that imports correctly
 # First check what main.py expects from trading_engine
 
 import re
