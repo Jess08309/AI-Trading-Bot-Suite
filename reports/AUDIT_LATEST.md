@@ -139,20 +139,24 @@ The GOOGL windfall was a known pre-cloud-migration incident where the bot held p
 
 ## 5. Consolidated Action List
 
-**Priority 1 (deploy this week):**
-- [ ] CryptoBot: block long-only entries in SIDE regime
-- [ ] PutSeller: fix EMERGENCY_CALL trigger (raise to 7% OR switch to delta-0.35)
-- [ ] CryptoBot: blacklist PI_XBTUSD, MATIC-USD, ADA/USD, NEAR-USD, UNI/USD
+**Priority 1 (deployed 2026-04-21 via `tools/audit_fix_20260421.py`):**
+- [x] **CryptoBot: tighten SIDE-regime gate** — `SIDE_MARKET_ML_OVERRIDE` 0.66 → **0.72**, plus global `MIN_ML_CONFIDENCE` 0.60 → **0.62**. Expected to reduce SIDE-regime trade flow sharply (currently 60% of all trades, 30% WR, −$86).
+- [x] **CryptoBot: blacklist 5 worst symbols** — `PI_XBTUSD`, `ADA/USD`, `UNI/USD`, `MATIC/USD`, `NEAR/USD` (+ dash-variants `MATIC-USD`, `NEAR-USD` as belt-and-suspenders). Added to `SYMBOL_BLACKLIST` and removed from `SPOT_SYMBOLS`/`FUTURES_SYMBOLS` so they aren't even scanned. Combined lifetime: **−$102 across 161 trades.**
+- [x] **PutSeller: `EMERGENCY_BUFFER_PCT` 0.05 → 0.08** — 5% buffer was firing too late (1W / 16L, −$2,893 lifetime). 8% gives earlier defensive exit.
+- [x] **CallBuyer: added `BP`, `BITO` to `callbuyer.blocked`** in `backtest_grades.json` — 0W/3L combined, −$483. Permanently excluded from universe.
+
+All three services restarted cleanly at 2026-04-21 16:49–16:50 UTC. Config backups tagged `.bak.20260421T164853Z`.
 
 **Priority 2 (this month):**
-- [ ] PutSeller: cap per-underlying exposure at 25% of positions
-- [ ] CallBuyer: blacklist BP, BITO
+- [ ] PutSeller: cap per-underlying exposure at 25% of positions (AMZN is 39% of trades)
 - [ ] Dashboard: add "Net Equity vs Start" KPI
+- [ ] Consider enabling CryptoBot short-side for DOWN regime (currently −$77 in long_only)
 
 **Priority 3 (monitoring):**
 - [ ] CallBuyer: re-evaluate ML after 15 more trade outcomes
-- [ ] CryptoBot: re-evaluate tuning after 7 more trading days
+- [ ] CryptoBot: re-evaluate tuning after 7 more trading days with new SIDE gate
 - [ ] PutSeller: investigate call-side logic ex-AMZN
+- [ ] PutSeller: watch EMERGENCY_CALL outcomes — if 8% still triggers too late, move to delta-based trigger at |Δ|≥0.35
 
 ---
 
