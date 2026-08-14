@@ -108,6 +108,8 @@ class PutSellerAPI:
             "cash": float(acct.cash),
             "buying_power": float(acct.buying_power),
             "portfolio_value": float(acct.portfolio_value),
+            "day_trade_count": int(acct.daytrade_count or 0),
+            "pattern_day_trader": acct.pattern_day_trader,
         }
 
     def get_allocation(self) -> float:
@@ -240,7 +242,10 @@ class PutSellerAPI:
                     "symbol": option_symbol,
                     "bid": bid,
                     "ask": ask,
-                    "mid": round((bid + ask) / 2, 2) if (bid > 0 or ask > 0) else 0,
+                    # Mid is only meaningful with a two-sided market; a one-sided
+                    # quote (bid=0 or ask=0) would yield garbage like ask/2.
+                    "mid": round((bid + ask) / 2, 2) if (bid > 0 and ask > 0) else 0,
+                    "one_sided": not (bid > 0 and ask > 0),
                     "bid_size": int(q.get("bs", 0)),
                     "ask_size": int(q.get("as", 0)),
                 }
@@ -293,9 +298,38 @@ class PutSellerAPI:
             log.debug(f"Snapshot failed for {option_symbol}: {e}")
             return None
 
-    # ── Multi-Leg Orders (Credit Spreads) ────────────────
+    # ── Broker Positions (ground truth) ──────────────────
+    def get_option_positions(self) -> Optional[Dict[str, int]]:
+        """Return {occ_symbol: signed_qty} for all option positions at the broker.
+        Returns None (not {}) on API failure so callers can distinguish
+        'flat account' from 'could not verify'.
+        """
+        try:
+            self._throttle()
+            import requests as req
+            url = f"{self.config.BASE_URL}/v2/positions"
+            headers = {
+                "APCA-API-KEY-ID": self.config.API_KEY,
+                "APCA-API-SECRET-KEY": self.config.API_SECRET,
+                "accept": "application/json",
+            }
+            resp = req.get(url, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                log.warning(f"get_option_positions: API returned {resp.status_code}")
+                return None
+            return {
+                p["symbol"]: int(float(p["qty"]))
+                for p in resp.json()
+                if p.get("asset_class") == "us_option"
+            }
+        except Exception as e:
+            log.error(f"get_option_positions failed: {e}")
+            return None
+
+    # ── Multi-Leg Orders (Credit Spreads) ────────────────────
     def submit_credit_spread(self, short_symbol: str, long_symbol: str,
-                              qty: int, credit_limit: float) -> Optional[str]:
+                              qty: int, credit_limit: float,
+                              client_order_id: Optional[str] = None) -> Optional[str]:
         """
         Submit a bull put spread (credit spread) as a multi-leg order.
 
@@ -326,7 +360,7 @@ class PutSellerAPI:
                 "limit_price": str(round(-abs(credit_limit), 2)),  # negative = credit
                 "qty": str(qty),
                 "time_in_force": "day",
-                "client_order_id": f"{self.config.ORDER_PREFIX}{uuid.uuid4().hex[:12]}",
+                "client_order_id": client_order_id or f"{self.config.ORDER_PREFIX}{uuid.uuid4().hex[:12]}",
                 "legs": [
                     {
                         "symbol": short_symbol,
@@ -354,13 +388,16 @@ class PutSellerAPI:
                 log.error(f"Credit spread order failed: {resp.status_code} {resp.text[:300]}")
                 if "insufficient" in resp.text.lower():
                     return "NO_BUYING_POWER"
+                if "client_order_id must be unique" in resp.text.lower() or "duplicate" in resp.text.lower():
+                    return "DUPLICATE_ORDER"
                 return None
         except Exception as e:
             log.error(f"Credit spread order error: {e}")
             return None
 
     def close_credit_spread(self, short_symbol: str, long_symbol: str,
-                             qty: int, debit_limit: float) -> Optional[str]:
+                             qty: int, debit_limit: float,
+                             client_order_id: Optional[str] = None) -> Optional[str]:
         """
         Close a bull put spread by buying back the short and selling the long.
 
@@ -385,7 +422,7 @@ class PutSellerAPI:
                 "limit_price": str(round(abs(debit_limit), 2)),  # positive = debit
                 "qty": str(qty),
                 "time_in_force": "day",
-                "client_order_id": f"{self.config.ORDER_PREFIX}cl_{uuid.uuid4().hex[:10]}",
+                "client_order_id": client_order_id or f"{self.config.ORDER_PREFIX}cl_{uuid.uuid4().hex[:10]}",
                 "legs": [
                     {
                         "symbol": short_symbol,
@@ -513,14 +550,19 @@ class PutSellerAPI:
         try:
             self._throttle()
             order = self.trading.get_order_by_id(order_id)
+            # order.side/order.status are enums (e.g. OrderStatus.FILLED); str() on
+            # an enum yields "OrderStatus.FILLED", not "filled", which broke every
+            # `== "filled"` fill-check downstream. Use .value to get the raw string.
+            side = order.side.value if order.side is not None else None
+            status = order.status.value if order.status is not None else None
             return {
                 "id": str(order.id),
                 "symbol": order.symbol,
-                "side": str(order.side),
+                "side": side,
                 "qty": float(order.qty) if order.qty else 0,
                 "filled_qty": float(order.filled_qty) if order.filled_qty else 0,
                 "filled_avg_price": float(order.filled_avg_price) if order.filled_avg_price else 0,
-                "status": str(order.status),
+                "status": status,
             }
         except Exception as e:
             log.error(f"Order check failed for {order_id}: {e}")

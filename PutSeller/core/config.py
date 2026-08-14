@@ -40,6 +40,8 @@ class PutSellerConfig:
     MAX_POSITION_RISK_PCT: float = 0.03     # 3% of allocation per spread (live-realistic)
     MAX_POSITIONS: int = 12                  # max concurrent put spreads (was 37 — reduced for $53K account)
     MAX_PER_UNDERLYING: int = 2              # max 2 spreads per stock (live-realistic)
+    SYMBOL_LOSS_LIMIT: int = 2                # consecutive losses on ONE underlying before pausing it
+    SYMBOL_COOLDOWN_DAYS: int = 5             # how long to avoid re-entering a paused underlying
 
     # ── Strategy: Bull Put Spreads (Credit) ──────────────
     # DTE targeting
@@ -89,9 +91,9 @@ class PutSellerConfig:
     # ── Timing ───────────────────────────────────────────
     SCAN_INTERVAL_SEC: int = 900             # 15 min between full opportunity scans
     CHECK_INTERVAL_SEC: int = 300            # 5 min between position checks (exits)
-    MARKET_OPEN_HOUR: int = 7               # 7:30 AM MT = 9:30 AM ET
+    MARKET_OPEN_HOUR: int = 9                # 9:30 AM ET (compared against America/New_York clock)
     MARKET_OPEN_MIN: int = 30
-    MARKET_CLOSE_HOUR: int = 14              # 2:00 PM MT = 4:00 PM ET
+    MARKET_CLOSE_HOUR: int = 16               # 4:00 PM ET
     MARKET_CLOSE_MIN: int = 0
 
     # Avoid opening in first/last 30 minutes (volatile)

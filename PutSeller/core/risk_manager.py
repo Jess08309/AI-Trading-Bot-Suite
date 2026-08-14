@@ -5,7 +5,7 @@ Isolated from AlpacaBot's risk_manager.
 import json
 import logging
 import os
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Dict, Any, Optional
 
 from core.config import PutSellerConfig
@@ -15,6 +15,15 @@ log = logging.getLogger("putseller.risk")
 
 class RiskManager:
     """Manages capital allocation, position sizing, and risk tracking."""
+
+    # FINRA retired the PDT trade-counting/$25k rule, replacing it with a
+    # risk-based intraday margin framework (SEC-approved 2026-04-14, effective
+    # 2026-06-04; brokers have until 2027-10-20 to fully migrate). Off by
+    # default; flip PDT_GUARD_ENABLED=true if a broker still enforces the old
+    # rule during its transition window.
+    PDT_GUARD_ENABLED = os.getenv("PDT_GUARD_ENABLED", "false").strip().lower() in ("true", "1", "yes")
+    PDT_EQUITY_THRESHOLD = 25_000.0
+    PDT_DAY_TRADE_LIMIT = 3
 
     def __init__(self, config: PutSellerConfig):
         self.config = config
@@ -28,6 +37,8 @@ class RiskManager:
             "daily_pnl": 0.0,
             "last_trade_date": None,
             "consecutive_losses": 0,
+            "symbol_losses": {},       # underlying -> consecutive loss count
+            "symbol_pause_until": {},  # underlying -> ISO timestamp to avoid re-entry until
         }
         self._load_state()
 
@@ -77,12 +88,16 @@ class RiskManager:
     def can_open_position(self, current_positions: int,
                           underlying: str,
                           positions: Dict[str, Any],
-                          spread_type: str = "put") -> tuple:
+                          spread_type: str = "put",
+                          account: Optional[Dict[str, Any]] = None) -> tuple:
         """Check if we can open a new position.
 
         Checks put and call limits INDEPENDENTLY per tastylive iron condor
         mechanics — each side is managed separately so one side's limits
         don't block the other.
+
+        account: optional dict from PutSellerAPI.get_account() — when provided,
+        enforces a Pattern Day Trader (PDT) guard using live broker data.
 
         Returns (can_open: bool, reason: str)
         """
@@ -90,6 +105,11 @@ class RiskManager:
         today = date.today().isoformat()
         if self.state.get("last_trade_date") and self.state["last_trade_date"] != today:
             self.state["daily_pnl"] = 0.0
+
+        if account is not None:
+            can_pdt, reason_pdt = self.check_pdt_guard(account)
+            if not can_pdt:
+                return False, reason_pdt
 
         # ── Risk utilization cap: block if total risk > 85% of balance ──
         total_risk = sum(p.get("max_loss_total", 0) for p in positions.values())
@@ -130,6 +150,19 @@ class RiskManager:
         if underlying_count >= self.config.MAX_PER_UNDERLYING:
             return False, f"max {self.config.MAX_PER_UNDERLYING} positions per underlying ({underlying})"
 
+        # Per-underlying loss cooldown: repeatedly re-selling puts on a stock
+        # that keeps trending toward (or through) the short strike just stacks
+        # up EMERGENCY_PUT/STOP_LOSS exits on the same name. Pause new entries
+        # on that underlying for a few days after back-to-back losses on it.
+        pause_until_str = self.state.get("symbol_pause_until", {}).get(underlying)
+        if pause_until_str:
+            try:
+                pause_until = datetime.fromisoformat(pause_until_str)
+            except ValueError:
+                pause_until = None
+            if pause_until and datetime.now() < pause_until:
+                return False, f"{underlying}: paused after repeated losses until {pause_until_str}"
+
         # Daily loss limit: -3% of allocation
         # Guard: if balance is near-zero (API glitch), skip this check
         if self.state["current_balance"] < 100:
@@ -143,6 +176,28 @@ class RiskManager:
         side_losses = self.state.get(side_key, self.state["consecutive_losses"])
         if side_losses >= 4:
             return False, f"consecutive {spread_type} losses: {side_losses} — cooling off"
+
+        return True, "OK"
+
+    def check_pdt_guard(self, account: Dict[str, Any]) -> tuple:
+        """Pattern Day Trader guard — see AlpacaBot's RiskManager for full rationale.
+        Credit spreads here typically run 30-45 DTE so day-trade risk is lower,
+        but early closes (stop loss / take profit hit same day as entry) can
+        still count as a day trade, so this guard applies uniformly.
+        """
+        equity = account.get("equity", 0) or 0
+        if equity >= self.PDT_EQUITY_THRESHOLD:
+            return True, "OK"
+
+        if account.get("pattern_day_trader"):
+            return False, "PDT: account flagged pattern day trader — new entries blocked"
+
+        day_trade_count = account.get("day_trade_count", 0) or 0
+        if day_trade_count >= self.PDT_DAY_TRADE_LIMIT:
+            return False, (
+                f"PDT: {day_trade_count} day trades used (limit {self.PDT_DAY_TRADE_LIMIT} "
+                f"for equity < ${self.PDT_EQUITY_THRESHOLD:,.0f}) — blocking new entries"
+            )
 
         return True, "OK"
 
@@ -175,14 +230,27 @@ class RiskManager:
 
         side_key = f"consecutive_losses_{spread_type}"
 
+        symbol_losses = self.state.setdefault("symbol_losses", {})
+        symbol_pause_until = self.state.setdefault("symbol_pause_until", {})
+
         if pnl >= 0:
             self.state["wins"] += 1
             self.state["consecutive_losses"] = 0
             self.state[side_key] = 0
+            symbol_losses[symbol] = 0
+            symbol_pause_until.pop(symbol, None)
         else:
             self.state["losses"] += 1
             self.state["consecutive_losses"] += 1
             self.state[side_key] = self.state.get(side_key, 0) + 1
+            symbol_losses[symbol] = symbol_losses.get(symbol, 0) + 1
+            if symbol_losses[symbol] >= self.config.SYMBOL_LOSS_LIMIT:
+                pause_until = datetime.now() + timedelta(days=self.config.SYMBOL_COOLDOWN_DAYS)
+                symbol_pause_until[symbol] = pause_until.isoformat()
+                log.warning(
+                    f"{symbol}: {symbol_losses[symbol]} consecutive losses — "
+                    f"pausing new entries until {pause_until.isoformat()}"
+                )
 
         win_rate = (self.state["wins"] / self.state["total_trades"] * 100
                     if self.state["total_trades"] > 0 else 0)

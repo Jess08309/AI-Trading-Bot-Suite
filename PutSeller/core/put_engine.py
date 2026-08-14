@@ -23,6 +23,7 @@ import logging
 import os
 import time as _time
 from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 from typing import Dict, Any, Optional, List
 
 from core.config import PutSellerConfig
@@ -119,6 +120,7 @@ class PutSellerEngine:
         self._warmup_data: Dict[str, Any] = {}
         self._WARMUP_MINUTES_BEFORE_OPEN = 30
         self._last_adoption: float = 0.0
+        self._entry_attempts: Dict[str, int] = {}  # idempotency attempt counters
 
     # ── Persistence ──────────────────────────────────────
     def _load_positions(self):
@@ -189,7 +191,8 @@ class PutSellerEngine:
             # CallBuyer-tracked contracts (don't steal their positions)
             callbuyer_contracts = set()
             try:
-                cb_path = r"C:\CallBuyer\data\state\positions.json"
+                # Sibling-bot install layout: <suite>/PutSeller, <suite>/CallBuyer
+                cb_path = os.path.join("..", "CallBuyer", "data", "state", "positions.json")
                 if os.path.exists(cb_path):
                     with open(cb_path, encoding="utf-8-sig") as f:
                         cb_positions = json.load(f)
@@ -197,6 +200,21 @@ class PutSellerEngine:
                         callbuyer_contracts.add(cb_pos.get("contract", ""))
             except Exception:
                 pass
+
+            # AlpacaBot-tracked contracts (it trades debit spreads on this account)
+            alpacabot_contracts = set()
+            try:
+                ab_path = os.path.join("..", "AlpacaBot", "data", "state", "positions.json")
+                if os.path.exists(ab_path):
+                    with open(ab_path, encoding="utf-8-sig") as f:
+                        ab_positions = json.load(f)
+                    for ab_pos in ab_positions.values():
+                        for k in ("contract", "short_symbol", "long_symbol"):
+                            if ab_pos.get(k):
+                                alpacabot_contracts.add(ab_pos[k])
+            except Exception:
+                pass
+            foreign_contracts = callbuyer_contracts | alpacabot_contracts
 
             # Group by underlying + expiry + option_type to find spread pairs
             short_legs = {}  # key: (underlying, expiry, type) -> list of positions
@@ -238,6 +256,10 @@ class PutSellerEngine:
                     if short["symbol"] in tracked_symbols:
                         continue
 
+                    # Skip if this leg is managed by a sibling bot
+                    if short["symbol"] in foreign_contracts:
+                        continue
+
                     # Find matching long (same qty, different strike)
                     best_long = None
                     for lng in longs:
@@ -250,8 +272,8 @@ class PutSellerEngine:
                     if not best_long:
                         continue
 
-                    # Skip if long leg is managed by CallBuyer
-                    if best_long["symbol"] in callbuyer_contracts:
+                    # Skip if long leg is managed by a sibling bot
+                    if best_long["symbol"] in foreign_contracts:
                         continue
 
                     # Parse expiration date
@@ -268,10 +290,18 @@ class PutSellerEngine:
                     spread_width = abs(short["strike"] - best_long["strike"])
                     spread_type = "put" if opt_type == "P" else "call"
 
-                    # Estimate credit from Alpaca avg_entry_prices
+                    # Net credit from Alpaca avg_entry_prices. If <= 0 this is a
+                    # DEBIT spread — not a strategy this bot trades. Adopting it
+                    # with a fabricated credit corrupts every exit rule and P&L
+                    # calc (root cause of the stuck-CIFR incident), so skip it.
                     credit = short["avg_entry"] - best_long["avg_entry"]
                     if credit <= 0:
-                        credit = spread_width * 0.15  # fallback estimate
+                        log.warning(
+                            f"Adoption skipped: {short['symbol']}/{best_long['symbol']} "
+                            f"is a debit spread (net {credit:.2f}) — not a credit "
+                            f"spread, likely another bot's position"
+                        )
+                        continue
 
                     pos_id = (
                         f"{underlying}_{exp_iso}_{opt_type}"
@@ -376,9 +406,9 @@ class PutSellerEngine:
         """
         PORTFOLIO_MAX_PCT = 0.50  # 50% of equity (combined allocation: PS 35% + CB 15% + AB 0%)
         POSITION_FILES = {
-            r"C:\PutSeller\data\state\positions.json": "max_loss_total",
-            r"C:\CallBuyer\data\state\positions.json": "entry_total",
-            r"C:\AlpacaBot\data\state\positions.json": "cost",
+            os.path.join("data", "state", "positions.json"): "max_loss_total",
+            os.path.join("..", "CallBuyer", "data", "state", "positions.json"): "entry_total",
+            os.path.join("..", "AlpacaBot", "data", "state", "positions.json"): "cost",
         }
         try:
             acct = self.api.get_account()
@@ -450,7 +480,9 @@ class PutSellerEngine:
         log.info(f"Account: ${acct['equity']:,.2f} equity | "
                  f"IronCondor allocation: ${allocation:,.2f}")
 
-        # Adopt orphaned spreads from Alpaca that aren't tracked
+        # Reconcile local tracking against broker ground truth, then adopt
+        # any orphaned spreads that aren't tracked
+        self._reconcile_all_positions()
         self._adopt_orphaned_spreads()
 
         self.running = True
@@ -490,8 +522,9 @@ class PutSellerEngine:
                     self._manage_positions()
                     self._last_check = now
 
-                # Re-adopt orphaned spreads every 30 minutes
+                # Re-reconcile + re-adopt orphaned spreads every 30 minutes
                 if now - self._last_adoption >= 1800:
+                    self._reconcile_all_positions()
                     self._adopt_orphaned_spreads()
                     self._last_adoption = now
 
@@ -552,6 +585,14 @@ class PutSellerEngine:
 
         if not short_quote or not long_quote:
             log.debug(f"Could not get quotes for {underlying} spread")
+            return None
+
+        # One-sided quotes (bid=0 or ask=0) make the mid meaningless — acting
+        # on it causes false TAKE_PROFIT/STOP_LOSS exits on illiquid contracts.
+        if short_quote.get("one_sided") or long_quote.get("one_sided"):
+            log.debug(f"{underlying}: one-sided quote (short bid/ask "
+                      f"{short_quote['bid']}/{short_quote['ask']}, long "
+                      f"{long_quote['bid']}/{long_quote['ask']}) — skipping exit check")
             return None
 
         # Current spread value = short_mid - long_mid (what it costs to close)
@@ -635,6 +676,10 @@ class PutSellerEngine:
         if not pos:
             return
 
+        # Backoff: skip if a recent close attempt failed and we're cooling down
+        if pos.get("next_close_retry_ts", 0) > _time.time():
+            return
+
         underlying = pos["underlying"]
         short_sym = pos["short_symbol"]
         long_sym = pos["long_symbol"]
@@ -679,7 +724,21 @@ class PutSellerEngine:
             close_filled = leg_success
 
         if not close_filled:
-            log.error(f"{underlying}: CLOSE FAILED — keeping position tracked for retry")
+            failures = pos.get("close_failures", 0) + 1
+            pos["close_failures"] = failures
+            # Exponential backoff: 5m, 10m, 20m... capped at 1h. Prevents the
+            # infinite every-cycle retry loop observed with the stuck CIFR spread.
+            backoff = min(300 * (2 ** (failures - 1)), 3600)
+            pos["next_close_retry_ts"] = _time.time() + backoff
+            self._save_positions()
+            log.error(f"{underlying}: CLOSE FAILED (attempt {failures}) — "
+                      f"retry in {backoff//60}m")
+            # Circuit breaker: repeated identical failures usually mean the
+            # position no longer exists at the broker — verify ground truth.
+            if failures >= 3:
+                log.warning(f"{underlying}: {failures} consecutive close failures — "
+                            f"running broker reconciliation")
+                self._reconcile_position(pos_id)
             return
 
         # Calculate PnL
@@ -690,6 +749,9 @@ class PutSellerEngine:
         # Record trade
         hold_days = (date.today() - datetime.strptime(
             pos["open_date"], "%Y-%m-%d").date()).days
+
+        pos.pop("close_failures", None)
+        pos.pop("next_close_retry_ts", None)
 
         self.risk.record_trade(total_pnl, underlying,
                                spread_type=pos.get("spread_type", "put"))
@@ -739,6 +801,85 @@ class PutSellerEngine:
         del self.positions[pos_id]
         self._save_positions()
 
+    # ── Broker Reconciliation ────────────────────────────
+    def _reconcile_position(self, pos_id: str) -> bool:
+        """Verify a single tracked position against broker ground truth.
+
+        If the broker shows NEITHER leg, the local entry is a ghost (already
+        closed/expired at the broker) — record it and remove it so the bot
+        stops retrying doomed close orders. Returns True if a ghost was removed.
+        """
+        pos = self.positions.get(pos_id)
+        if not pos:
+            return False
+
+        broker_legs = self.api.get_option_positions()
+        if broker_legs is None:
+            log.warning(f"Reconcile {pos_id}: could not fetch broker positions — skipping")
+            return False
+
+        short_at_broker = pos["short_symbol"] in broker_legs
+        long_at_broker = pos["long_symbol"] in broker_legs
+
+        if short_at_broker or long_at_broker:
+            log.info(f"Reconcile {pos_id}: legs still at broker "
+                     f"(short={short_at_broker}, long={long_at_broker}) — keeping")
+            return False
+
+        # Ghost: broker is flat on both legs. Use last-known mark as P&L
+        # estimate (actual fill data may be unavailable for old orders).
+        credit = pos.get("credit_per_share", 0)
+        current_debit = pos.get("current_debit", credit)
+        qty = pos.get("qty", 1)
+        est_pnl = (credit - current_debit) * qty * 100
+        est_pnl_pct = ((credit - current_debit) / credit * 100) if credit > 0 else 0
+
+        log.critical(
+            f"RECONCILE GHOST: {pos_id} not present at broker — removing from "
+            f"tracking. Estimated PnL ${est_pnl:+,.2f} (from last mark; verify "
+            f"against broker order history)"
+        )
+
+        self.risk.record_trade(est_pnl, pos["underlying"],
+                               spread_type=pos.get("spread_type", "put"))
+        self._log_trade({
+            "timestamp": datetime.now().isoformat(),
+            "underlying": pos["underlying"],
+            "spread_type": pos.get("spread_type", "put"),
+            "short_strike": pos["short_strike"],
+            "long_strike": pos["long_strike"],
+            "expiration": pos["expiration"],
+            "qty": qty,
+            "credit": credit,
+            "close_debit": current_debit,
+            "pnl": est_pnl,
+            "pnl_pct": est_pnl_pct,
+            "hold_days": 0,
+            "exit_reason": "RECONCILED_GHOST (broker flat; PnL estimated from last mark)",
+            "open_date": pos.get("open_date", ""),
+        })
+        del self.positions[pos_id]
+        self._save_positions()
+        return True
+
+    def _reconcile_all_positions(self):
+        """Sweep all tracked positions against broker state, removing ghosts."""
+        if not self.positions:
+            return
+        broker_legs = self.api.get_option_positions()
+        if broker_legs is None:
+            log.warning("Reconcile sweep: could not fetch broker positions — skipping")
+            return
+        ghosts = [
+            pos_id for pos_id, pos in self.positions.items()
+            if pos["short_symbol"] not in broker_legs
+            and pos["long_symbol"] not in broker_legs
+        ]
+        for pos_id in ghosts:
+            self._reconcile_position(pos_id)
+        if ghosts:
+            log.info(f"Reconcile sweep: removed {len(ghosts)} ghost position(s)")
+
     # ── Opportunity Scanner ──────────────────────────────
     def _scan_opportunities(self):
         """Scan watchlist for credit put AND call spread opportunities."""
@@ -750,6 +891,7 @@ class PutSellerEngine:
                  f"{len(self.positions)} open positions")
 
         # Update allocation from current equity
+        acct = None
         try:
             acct = self.api.get_account()
             self.risk.update_allocation(acct["equity"])
@@ -950,7 +1092,7 @@ class PutSellerEngine:
             if put_opened < put_budget and put_count + put_opened < effective_max_puts:
                 can_open, reason = self.risk.can_open_position(
                     len(self.positions), symbol, self.positions,
-                    spread_type="put"
+                    spread_type="put", account=acct
                 )
                 if can_open:
                     try:
@@ -979,7 +1121,7 @@ class PutSellerEngine:
                     and call_count + call_opened < effective_max_calls):
                 can_open_call, call_reason = self.risk.can_open_position(
                     len(self.positions), symbol, self.positions,
-                    spread_type="call"
+                    spread_type="call", account=acct
                 )
                 if can_open_call:
                     try:
@@ -1604,6 +1746,50 @@ class PutSellerEngine:
                 return True
         return False
 
+    def _entry_idempotency_key(self, spread: Dict[str, Any], qty: int) -> str:
+        """Deterministic client_order_id for an entry attempt.
+
+        Same legs+qty+day+attempt# always produce the same key, so if an HTTP
+        timeout hides a successful submission, the retry is rejected by Alpaca
+        as a duplicate client_order_id instead of double-filling. The attempt
+        counter only increments after a CONFIRMED cancel/rejection.
+        """
+        import hashlib
+        legs = f"{spread['short_symbol']}|{spread['long_symbol']}|{qty}"
+        attempt = self._entry_attempts.get(legs, 0)
+        raw = f"{legs}|{date.today().isoformat()}|{attempt}"
+        return f"{self.config.ORDER_PREFIX}{hashlib.sha1(raw.encode()).hexdigest()[:16]}"
+
+    def _pre_order_gate(self, spread: Dict[str, Any], qty: int) -> tuple:
+        """Final risk + broker-state verification immediately before submit.
+
+        Re-checks risk limits against FRESH account data and verifies neither
+        leg already exists at the broker (catches fills the bot lost track of,
+        which local _has_strike_overlap cannot see).
+        Returns (ok: bool, reason: str).
+        """
+        try:
+            acct = self.api.get_account()
+        except Exception as e:
+            return False, f"pre-order account fetch failed: {e}"
+
+        self.risk.update_allocation(acct["equity"])
+        can_open, reason = self.risk.can_open_position(
+            len(self.positions), spread["underlying"], self.positions,
+            spread_type=spread.get("spread_type", "put"), account=acct,
+        )
+        if not can_open:
+            return False, f"pre-order risk gate: {reason}"
+
+        broker_legs = self.api.get_option_positions()
+        if broker_legs is None:
+            return False, "pre-order: could not verify broker positions"
+        for leg in (spread["short_symbol"], spread["long_symbol"]):
+            if leg in broker_legs:
+                return False, (f"pre-order: leg {leg} already exists at broker "
+                               f"(qty {broker_legs[leg]}) — possible untracked fill")
+        return True, "OK"
+
     def _execute_spread(self, spread: Dict[str, Any],
                         capital_in_use: float) -> bool:
         """Execute a credit spread (put or call) and track the position."""
@@ -1636,6 +1822,12 @@ class PutSellerEngine:
 
         spread["qty"] = qty  # set qty for capital tracking in scan loop
 
+        # Final gate: fresh risk check + broker leg-conflict check
+        gate_ok, gate_reason = self._pre_order_gate(spread, qty)
+        if not gate_ok:
+            log.warning(f"{underlying}: BLOCKED — {gate_reason}")
+            return False
+
         total_credit = credit * qty * 100
         total_max_loss = max_loss_per_contract * qty
 
@@ -1655,33 +1847,40 @@ class PutSellerEngine:
         # Use mid credit with realistic slippage for live-like fills
         fill_credit = round(credit * 0.85, 2)  # accept 15% less credit (realistic slippage)
 
+        legs_key = f"{spread['short_symbol']}|{spread['long_symbol']}|{qty}"
         order_id = self.api.submit_credit_spread(
             short_symbol=spread["short_symbol"],
             long_symbol=spread["long_symbol"],
             qty=qty,
             credit_limit=fill_credit,
+            client_order_id=self._entry_idempotency_key(spread, qty),
         )
 
         if order_id == "NO_BUYING_POWER":
             log.error(f"SPREAD ORDER FAILED for {underlying} — insufficient buying power")
             self._buying_power_exhausted = True
             return False
+        if order_id == "DUPLICATE_ORDER":
+            log.error(f"{underlying}: duplicate client_order_id rejected — an earlier "
+                      f"submission likely succeeded; skipping (reconciliation will adopt it)")
+            return False
         if not order_id:
-            log.error(f"SPREAD ORDER FAILED for {underlying}")
             return False
 
         # Verify fill — wait up to 120s for the order to fill
         filled = False
+        actual_fill = None
         for _wait in range(24):
             _time.sleep(5)
             order_status = self.api.get_order(order_id)
             if order_status and order_status.get("status") == "filled":
                 filled = True
-                actual_fill = order_status.get("filled_avg_price", fill_credit)
-                log.info(f"{underlying}: order filled @ ${abs(actual_fill):.2f}")
+                actual_fill = abs(order_status.get("filled_avg_price", 0)) or fill_credit
+                log.info(f"{underlying}: order filled @ ${actual_fill:.2f}")
                 break
             elif order_status and order_status["status"] in ("canceled", "expired", "rejected"):
                 log.warning(f"{underlying}: order {order_status['status']} — no fill")
+                self._entry_attempts[legs_key] = self._entry_attempts.get(legs_key, 0) + 1
                 return False
 
         if not filled:
@@ -1690,7 +1889,26 @@ class PutSellerEngine:
                 self.api.trading.cancel_order_by_id(order_id)
             except Exception:
                 pass
-            return False
+            # Cancel/fill race: the order may have filled just before (or despite)
+            # the cancel. Re-check before declaring failure, otherwise the filled
+            # spread is real-but-untracked and the scan can open a duplicate.
+            _time.sleep(2)
+            final_status = self.api.get_order(order_id)
+            if final_status and final_status.get("status") == "filled":
+                filled = True
+                actual_fill = abs(final_status.get("filled_avg_price", 0)) or fill_credit
+                log.warning(f"{underlying}: order filled during cancel race @ "
+                            f"${actual_fill:.2f} — tracking position")
+            else:
+                self._entry_attempts[legs_key] = self._entry_attempts.get(legs_key, 0) + 1
+                return False
+
+        # Record P&L basis from the ACTUAL fill, not the scan-time mid — the
+        # limit allowed up to 15% less credit, so using the mid would
+        # systematically overstate realized P&L.
+        entry_credit = actual_fill if actual_fill else credit
+        total_credit = entry_credit * qty * 100
+        total_max_loss = (spread["spread_width"] - entry_credit) * 100 * qty
 
         # Track the position — unique key to prevent overwrites
         base_id = f"{underlying}_{spread['expiration']}_{spread_type[0].upper()}{int(spread['short_strike'])}"
@@ -1710,15 +1928,15 @@ class PutSellerEngine:
             "expiration": spread["expiration"],
             "dte_at_open": spread["dte"],
             "qty": qty,
-            "credit_per_share": credit,
+            "credit_per_share": entry_credit,
             "total_credit": total_credit,
-            "max_loss_per_contract": max_loss_per_contract,
+            "max_loss_per_contract": (spread["spread_width"] - entry_credit) * 100,
             "max_loss_total": total_max_loss,
             "max_profit_total": total_credit,
             "order_id": order_id,
             "open_date": date.today().isoformat(),
             "open_time": datetime.now().isoformat(),
-            "current_debit": credit,  # starts at credit value
+            "current_debit": entry_credit,  # starts at credit value
             "current_pnl_total": 0,
             "current_pnl_pct": 0,
             "roc_annual": spread["roc_annual"],
@@ -1772,7 +1990,7 @@ class PutSellerEngine:
 
     def _is_trading_window(self) -> bool:
         """Check if we're in the safe trading window (avoid open/close volatility)."""
-        now = datetime.now()
+        now = datetime.now(ZoneInfo("America/New_York"))
         market_open = now.replace(
             hour=self.config.MARKET_OPEN_HOUR,
             minute=self.config.MARKET_OPEN_MIN, second=0

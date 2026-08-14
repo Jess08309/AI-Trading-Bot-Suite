@@ -68,9 +68,12 @@ class TestPutSellerRiskManager(unittest.TestCase):
             config = MockConfig()
             config.ALLOCATION_PCT = 0.40
             config.MAX_POSITIONS = 8
+            config.MAX_CALL_POSITIONS = 8
             config.MAX_PER_UNDERLYING = 2
             config.MAX_POSITION_RISK_PCT = 0.05
             config.STATE_FILE = 'test_state.json'
+            config.SYMBOL_LOSS_LIMIT = 2
+            config.SYMBOL_COOLDOWN_DAYS = 5
 
             with patch('core.risk_manager.os.path.exists', return_value=False):
                 from core.risk_manager import RiskManager
@@ -86,9 +89,10 @@ class TestPutSellerRiskManager(unittest.TestCase):
     def test_max_positions_blocks_new_opens(self):
         """Should block when max positions reached."""
         rm = self._make_risk_manager()
-        can, reason = rm.can_open_position(8, "AAPL", {})
+        positions = {f"pos{i}": {"underlying": f"SYM{i}", "spread_type": "put"} for i in range(8)}
+        can, reason = rm.can_open_position(8, "AAPL", positions)
         self.assertFalse(can)
-        self.assertIn("max positions", reason.lower())
+        self.assertIn("max put positions", reason.lower())
 
     def test_per_underlying_limit(self):
         """Should block when MAX_PER_UNDERLYING reached for a symbol."""
