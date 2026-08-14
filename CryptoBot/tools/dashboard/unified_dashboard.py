@@ -22,9 +22,12 @@ from typing import Any, Dict, List, Optional
 from flask import Flask, jsonify, request
 
 # ── Paths ──────────────────────────────────────────────────────────────
-CRYPTO_ROOT = Path(r"C:\Bot")
-ALPACA_ROOT = Path(r"C:\AlpacaBot")
-PUTSELLER_ROOT = Path(r"C:\PutSeller")
+# Resolve relative to the repo root (this file lives at CryptoBot/tools/dashboard/)
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+CRYPTO_ROOT = Path(os.getenv("CRYPTO_ROOT", str(REPO_ROOT / "CryptoBot" / "cryptotrades")))
+ALPACA_ROOT = Path(os.getenv("ALPACA_ROOT", str(REPO_ROOT / "AlpacaBot")))
+PUTSELLER_ROOT = Path(os.getenv("PUTSELLER_ROOT", str(REPO_ROOT / "PutSeller")))
 
 CRYPTO_STATE = CRYPTO_ROOT / "data" / "state"
 CRYPTO_LOGS = CRYPTO_ROOT / "logs"
@@ -39,7 +42,7 @@ PUTSELLER_STATE = PUTSELLER_ROOT / "data" / "state"
 PUTSELLER_LOGS = PUTSELLER_ROOT / "logs"
 PUTSELLER_TRADES_CSV = PUTSELLER_ROOT / "data" / "trades.csv"
 
-CALLBUYER_ROOT = Path(r"C:\CallBuyer")
+CALLBUYER_ROOT = Path(os.getenv("CALLBUYER_ROOT", str(REPO_ROOT / "CallBuyer")))
 CALLBUYER_STATE = CALLBUYER_ROOT / "data" / "state"
 CALLBUYER_LOGS = CALLBUYER_ROOT / "logs"
 CALLBUYER_TRADES_CSV = CALLBUYER_ROOT / "data" / "trades.csv"
@@ -353,22 +356,26 @@ def _safe_float(v: Any, default: float = 0.0) -> float:
 
 
 def _get_process_info(venv_fragment: str) -> Optional[Dict]:
-    """Check if a bot process is alive by matching venv path."""
+    """Check if a bot process is alive by matching venv path (Linux: pgrep)."""
     try:
         result = subprocess.run(
-            ["powershell", "-NoProfile", "-c",
-             f"Get-CimInstance Win32_Process -Filter \"Name='python.exe' OR Name='pythonw.exe'\" | "
-             f"Where-Object {{ $_.CommandLine -like '*{venv_fragment}*' -and $_.WorkingSetSize -gt 50MB }} | "
-             f"Select-Object ProcessId, @{{N='MB';E={{[math]::Round($_.WorkingSetSize/1MB,1)}}}} | "
-             f"ConvertTo-Json"],
+            ["pgrep", "-af", "python"],
             capture_output=True, text=True, timeout=8,
-            creationflags=subprocess.CREATE_NO_WINDOW
         )
-        data = json.loads(result.stdout.strip()) if result.stdout.strip() else None
-        if isinstance(data, list):
-            data = data[0] if data else None
-        if data:
-            return {"pid": data.get("ProcessId"), "mem_mb": data.get("MB", 0)}
+        for line in result.stdout.splitlines():
+            if venv_fragment in line:
+                parts = line.split(None, 1)
+                pid = int(parts[0])
+                mem_mb = 0.0
+                try:
+                    with open(f"/proc/{pid}/status") as f:
+                        for l in f:
+                            if l.startswith("VmRSS:"):
+                                mem_mb = round(int(l.split()[1]) / 1024, 1)
+                                break
+                except Exception:
+                    pass
+                return {"pid": pid, "mem_mb": mem_mb}
     except Exception:
         pass
     return None
@@ -451,7 +458,7 @@ def _crypto_payload() -> Dict[str, Any]:
             "delta_equity": delta.get("equity", 0),
         }
 
-    process = _get_process_info("Bot\\.venv")
+    process = _get_process_info("CryptoBot/.venv")
     equity_curve = _equity_from_log(log_path)
 
     trade_history = _parse_csv_trades(CRYPTO_TRADES_CSV, limit=60)
@@ -543,7 +550,7 @@ def _alpaca_payload() -> Dict[str, Any]:
             "delta_equity": delta.get("equity", 0),
         }
 
-    process = _get_process_info("AlpacaBot\\.venv")
+    process = _get_process_info("AlpacaBot/.venv")
     trade_history = _parse_csv_trades(ALPACA_TRADES_CSV, limit=60)
 
     return {
@@ -664,7 +671,7 @@ def _putseller_payload() -> Dict[str, Any]:
     # Trade history
     trade_history = _parse_csv_trades(PUTSELLER_TRADES_CSV, limit=60)
 
-    process = _get_process_info("PutSeller\\.venv")
+    process = _get_process_info("PutSeller/.venv")
 
     return {
         "name": "IronCondor",
@@ -754,7 +761,7 @@ def _callbuyer_payload() -> Dict[str, Any]:
     log_entries = _parse_log_tail(log_path, limit=100, keywords=cb_keywords)
 
     trade_history = _parse_csv_trades(CALLBUYER_TRADES_CSV, limit=60)
-    process = _get_process_info("CallBuyer\\.venv")
+    process = _get_process_info("CallBuyer/.venv")
 
     return {
         "name": "CallBuyer",

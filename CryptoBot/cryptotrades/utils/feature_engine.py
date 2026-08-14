@@ -16,22 +16,16 @@ except ImportError:
 
 
 # Canonical feature order - must be consistent between training and prediction
-# 15 curated indicators: 10 user-selected momentum oscillators + 5 complementary
+# 7 curated indicators, trimmed from 15 based on live feature-importance data
+# (trix_15/atr_14/vol_ratio/rsi_14/mean_reversion consistently rank highest;
+# macd_histogram and bb_position kept for non-redundant trend/range context).
+# Dropped for near-zero importance: stoch_k, cci_20, roc_10, momentum_10,
+# williams_r, ultimate_osc, cmo_14, trend_strength.
 FEATURE_NAMES = [
-    # User's 10 momentum oscillators
     "rsi_14",           # RSI — momentum exhaustion / overbought-oversold
     "macd_histogram",   # MACD — momentum + trend shifts
-    "stoch_k",          # Stochastic %K — timing entries in ranges
-    "cci_20",           # CCI — deviation from mean, early reversals
-    "roc_10",           # Rate of Change — momentum acceleration
-    "momentum_10",      # Raw momentum — price difference over period
-    "williams_r",       # Williams %R — exhaustion points
-    "ultimate_osc",     # Ultimate Oscillator — multi-timeframe momentum
     "trix_15",          # TRIX — triple-smoothed trend momentum
-    "cmo_14",           # Chande Momentum — responsive overbought/oversold
-    # 5 complementary indicators
     "atr_14",           # ATR — volatility (normalized by price)
-    "trend_strength",   # ADX proxy — trending vs ranging
     "bb_position",      # Bollinger Band position — range context
     "mean_reversion",   # Z-score — overextended move detection
     "vol_ratio",        # Volatility ratio — regime detection

@@ -154,9 +154,8 @@ def compute_indicators(prices):
 
 # Feature order must match engine exactly
 FEATURE_NAMES = [
-    "rsi_14", "macd_histogram", "stoch_k", "cci_20", "roc_10",
-    "momentum_10", "williams_r", "ultimate_osc", "trix_15", "cmo_14",
-    "atr_14", "trend_strength", "bb_position", "mean_reversion", "vol_ratio",
+    "rsi_14", "macd_histogram", "trix_15", "atr_14",
+    "bb_position", "mean_reversion", "vol_ratio",
 ]
 
 X, y = [], []

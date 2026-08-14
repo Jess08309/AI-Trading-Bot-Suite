@@ -5,6 +5,7 @@ from backtest_harness import (
     _filter_prices_by_date,
     _max_drawdown,
     _rsi,
+    _simulate_symbol,
     _slippage_multiplier,
 )
 
@@ -35,6 +36,37 @@ class BacktestHarnessTests(unittest.TestCase):
         )
         self.assertEqual(len(out), 2)
         self.assertEqual(out[0][0], "2025-02-01T00:00:00")
+
+    def test_no_look_ahead_bias_in_signal(self):
+        """Look-ahead regression: the signal at bar N must NOT see bar N's close.
+
+        Series design: a steady up-zigzag (+0.5/-0.2) keeps RSI ~71 (blocks
+        LONG's rsi<70) and trend ~+2.5% (blocks SHORT's trend<-1%), so no
+        entry is ever valid on data through bar N-1. The final bar then drops
+        sharply — a signal only visible if the current bar's close leaks into
+        `history`. A correct harness produces ZERO trades; a look-ahead
+        harness enters SHORT on the final bar.
+        """
+        closes = [100.0]
+        for i in range(1, 70):
+            closes.append(closes[-1] + (0.5 if i % 2 == 1 else -0.2))
+        closes.append(closes[-1] - 5.0)  # final-bar crash
+
+        prices = [(f"2025-01-01T00:{i:02d}:00", c) for i, c in enumerate(closes)]
+        result = _simulate_symbol(
+            prices,
+            initial_balance=10_000.0,
+            max_position_pct=0.10,
+            stop_loss_pct=-5.0,
+            take_profit_pct=5.0,
+            trailing_stop_pct=2.0,
+            fee_rate=0.001,
+            slippage_bps=10.0,
+        )
+        self.assertEqual(
+            result["trades"], 0,
+            "Signal acted on the current bar's close — look-ahead bias reintroduced",
+        )
 
 
 if __name__ == "__main__":

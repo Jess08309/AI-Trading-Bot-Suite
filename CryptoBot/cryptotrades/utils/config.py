@@ -235,6 +235,10 @@ class TradingConfig:
     MODELS_DIR: str = "data/models"
     LOGS_DIR: str = "logs"
 
+    # ── Kraken Futures Real Order Execution ───────────────
+    KRAKEN_FUTURES_BASE_URL: str = "https://demo-futures.kraken.com/derivatives"  # demo (paper) by default
+    KRAKEN_FUTURES_ENABLE_REAL_ORDERS: bool = False  # off until explicitly enabled after review
+
     def __post_init__(self):
         """Override defaults with environment variables if set."""
         self.PAPER_TRADING = _env_bool("PAPER_TRADING", self.PAPER_TRADING)
@@ -255,6 +259,11 @@ class TradingConfig:
         self.ALPACA_RETRY_BASE_DELAY = _env_float("ALPACA_RETRY_BASE_DELAY", self.ALPACA_RETRY_BASE_DELAY)
         self.KRAKEN_RETRY_ATTEMPTS = _env_int("KRAKEN_RETRY_ATTEMPTS", self.KRAKEN_RETRY_ATTEMPTS)
         self.KRAKEN_RETRY_BASE_DELAY = _env_float("KRAKEN_RETRY_BASE_DELAY", self.KRAKEN_RETRY_BASE_DELAY)
+
+        self.KRAKEN_FUTURES_BASE_URL = os.getenv("KRAKEN_FUTURES_BASE_URL", self.KRAKEN_FUTURES_BASE_URL).strip()
+        self.KRAKEN_FUTURES_ENABLE_REAL_ORDERS = _env_bool(
+            "KRAKEN_FUTURES_ENABLE_REAL_ORDERS", self.KRAKEN_FUTURES_ENABLE_REAL_ORDERS
+        )
 
         self.MIN_TRADE_USD = _env_float("MIN_TRADE_USD", self.MIN_TRADE_USD)
         self.MIN_FUTURES_TRADE_USD = _env_float("MIN_FUTURES_TRADE_USD", self.MIN_FUTURES_TRADE_USD)

@@ -124,7 +124,10 @@ def _simulate_symbol(prices, initial_balance, max_position_pct, stop_loss_pct, t
     closes = [p[1] for p in prices]
     for idx in range(50, len(prices)):
         timestamp, raw_price = prices[idx]
-        history = closes[: idx + 1]
+        # Signal history = bars BEFORE this one. Including closes[idx] would
+        # let RSI/trend see the current bar's close and then fill at that same
+        # close (look-ahead bias).
+        history = closes[:idx]
 
         if position:
             fill_exit = raw_price * _slippage_multiplier(position["direction"], False, slippage_bps)

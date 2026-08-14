@@ -59,7 +59,10 @@ _fh.setLevel(logging.INFO)
 _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"))
 logger.addHandler(_fh)
 
-# Canonical 15-feature order (must match trading_engine.py)
+# Canonical 15-feature order (must match trading_engine.py's raw indicator stack).
+# NOTE: this standalone backtest trains on the full positional 15-row stack
+# from precompute_indicators() (see ind[:, i] below), independent of the live
+# engine's trimmed 7-feature FEATURE_NAMES in feature_engine.py.
 _ML_FEATURE_NAMES = [
     "rsi_14", "macd_histogram", "stoch_k", "cci_20", "roc_10",
     "momentum_10", "williams_r", "ultimate_osc", "trix_15", "cmo_14",

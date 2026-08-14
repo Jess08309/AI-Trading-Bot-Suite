@@ -1,9 +1,13 @@
 """Utility modules for AI-driven trading bot."""
 
-from .news_sentiment import (
-    fetch_crypto_news, fetch_crypto_news_rss, get_news_sentiment,
-    get_coin_sentiment, get_pair_sentiment,
-)
+try:
+    from .news_sentiment import (
+        fetch_crypto_news, fetch_crypto_news_rss, get_news_sentiment,
+        get_coin_sentiment, get_pair_sentiment,
+    )
+except ImportError:
+    fetch_crypto_news = fetch_crypto_news_rss = get_news_sentiment = None
+    get_coin_sentiment = get_pair_sentiment = None
 from .performance_tracker import PerformanceTracker
 try:
     from .rl_agent import RLTradingAgent

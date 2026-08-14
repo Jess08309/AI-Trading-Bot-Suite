@@ -86,16 +86,14 @@ class ConcurrentPriceFetcher:
                 resp.raise_for_status()
                 data = resp.json()
                 trades = data.get("trades", {})
-                logger.warning(
-                    f"BATCH-DEBUG: status={resp.status_code} "
-                    f"trade_keys={sorted(trades.keys())} "
-                    f"input_syms={sorted(symbols)} "
-                    f"matched={len(results)}"
-                )
                 for sym in symbols:
                     td = trades.get(sym)
                     if td and "p" in td:
                         results[sym] = float(td["p"])
+                logger.debug(
+                    f"Batch fetch: status={resp.status_code} "
+                    f"matched={len(results)}/{len(symbols)}"
+                )
                 if results:
                     break
             except Exception as e:

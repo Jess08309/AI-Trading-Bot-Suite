@@ -222,6 +222,29 @@ All sources are free and require no API keys. Each has its own in-memory cache w
 
 ---
 
+### 6.5 ML Challenger Shadow Mode
+
+An experimental "challenger" version of the direction model is trained alongside the
+production model using a larger sampling stride (`stride=4` vs. production's `stride=1`),
+which sharply reduces the ~95% sample overlap that causes the production model's chronic
+100% train accuracy / unstable OOS accuracy. The challenger:
+
+- Is trained only if the reduced-overlap dataset still has ≥100 samples (else the previous
+  challenger model is kept unchanged — never blocks or degrades anything).
+- Passes the same walk-forward validation, 55% OOS floor, 25% overfit-gap ceiling, and
+  isotonic probability calibration as the production model.
+- **Never sizes or opens a real/live position.** It only opens a virtual position in its
+  own `ml_challenger` shadow book when it independently agrees (with its own calibrated
+  confidence) with a trade the production model already decided to take.
+
+Enable with `ML_CHALLENGER_SHADOW_MODE=true` (independent of `RL_SHADOW_MODE`). Tune the
+agreement bar with `ML_CHALLENGER_MIN_CONFIDENCE` (default `0.60`). Results are written to
+`data/state/ml_challenger_shadow_report.json` (win rate, realized P&L, drawdown, and recent
+open/close events) so the challenger's real forward performance can be compared against the
+production model's actual results before ever promoting the new training methodology to live.
+
+---
+
 ### 6. Meta-Learner Ensemble
 
 **File:** `utils/meta_learner.py`
@@ -494,6 +517,7 @@ The bot persists all state to disk for crash recovery:
 | `data/state/price_history.json` | Last 500 prices per symbol (~8h at 1-min intervals) |
 | `data/state/rl_agent.json` | DQN weights, replay buffer, per-coin stats |
 | `data/state/rl_shadow_report.json` | Baseline vs RL portfolio comparison |
+| `data/state/ml_challenger_shadow_report.json` | Production vs. experimental challenger model comparison |
 | `data/state/meta_learner.json` | Ensemble weights and model accuracy history |
 | `data/state/scanner_probation.json` | Universe scanner new-symbol observation tracking |
 | `logs/trading_YYYYMMDD.log` | Daily log files |

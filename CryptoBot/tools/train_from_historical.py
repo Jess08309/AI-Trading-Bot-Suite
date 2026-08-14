@@ -47,7 +47,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("train_historical")
 
-# ── Feature names (must match trading_engine.py exactly) ──
+# ── Feature names (must match the full raw indicator stack below) ──
+# NOTE: this standalone tool trains on the full positional 15-row stack
+# (see indicators[:, i] below), independent of the live engine's trimmed
+# 7-feature FEATURE_NAMES in feature_engine.py.
 _ML_FEATURE_NAMES = [
     "rsi_14", "macd_histogram", "stoch_k", "cci_20", "roc_10",
     "momentum_10", "williams_r", "ultimate_osc", "trix_15", "cmo_14",

@@ -32,9 +32,21 @@ try:
 except Exception:
     RLTradingAgent = None
 
-# Alpaca crypto API — uses requests with API key headers (no SDK dependency)
+# Alpaca crypto API — raw requests session for price data (no SDK dependency)
 ALPACA_AVAILABLE = True  # Always available since we use requests directly
+
+# Real order execution uses alpaca-py's TradingClient
+try:
+    from alpaca.trading.client import TradingClient
+    from alpaca.trading.requests import MarketOrderRequest
+    from alpaca.trading.enums import OrderSide, TimeInForce
+    ALPACA_TRADING_SDK_AVAILABLE = True
+except Exception:
+    ALPACA_TRADING_SDK_AVAILABLE = False
 ALPACA_DATA_URL = "https://data.alpaca.markets/v1beta3/crypto/us"
+
+# Real order execution for Kraken Futures (in-house signed REST client)
+from core.kraken_futures_client import KrakenFuturesClient
 
 # ============================================================
 # PRODUCTION CONFIGURATION - Centralized & Simplified
@@ -48,13 +60,17 @@ class TradingConfig:
     LIVE_TRADING_WARNING: bool = False
     DRY_RUN: bool = False
 
-    # Capital — small experimental allocation
-    INITIAL_SPOT_BALANCE: float = 500.0
-    INITIAL_FUTURES_BALANCE: float = 500.0
+    # Capital — increased from $500/$500 to give the bot more spending power per trade
+    INITIAL_SPOT_BALANCE: float = 5000.0
+    INITIAL_FUTURES_BALANCE: float = 5000.0
 
     # Timing
-    RISK_CHECK_INTERVAL: int = 60          # 1 minute
-    TRADE_CYCLE_INTERVAL: int = 5          # 5 minutes (5 * 60 seconds)
+    RISK_CHECK_INTERVAL: int = 20           # was 60s — 60s polling caused stop-losses to
+                                             # slip well past target (see docs/internal/PERFORMANCE.md
+                                             # Issue #1); 20s further reduces slippage window
+    TRADE_CYCLE_INTERVAL: int = 15         # 15 * 20s = 5 min — unchanged trade-decision cadence
+                                            # (scaled up from 5 so tightening RISK_CHECK_INTERVAL
+                                            # doesn't also triple trade frequency — see Issue #2)
     MODEL_RETRAIN_HOURS: int = 8           # Retrain every 8h with new indicators
 
     # Data/API robustness
@@ -190,6 +206,10 @@ class TradingConfig:
     ALERT_DAILY_LOSS_PCT: float = -4.0
     ALERT_COOLDOWN_MIN: int = 60
 
+    # Kraken Futures real order execution
+    KRAKEN_FUTURES_BASE_URL: str = "https://demo-futures.kraken.com/derivatives"  # demo (paper) by default
+    KRAKEN_FUTURES_ENABLE_REAL_ORDERS: bool = False  # off until explicitly enabled after review
+
     def __post_init__(self):
         """Apply env overrides and validate configuration for safe runtime defaults."""
         def _env_bool(name: str, default: bool) -> bool:
@@ -224,6 +244,8 @@ class TradingConfig:
 
         self.TRADE_CYCLE_INTERVAL = _env_int("TRADE_CYCLE_INTERVAL_OVERRIDE", self.TRADE_CYCLE_INTERVAL)
         self.MODEL_RETRAIN_HOURS = _env_int("MODEL_RETRAIN_HOURS_OVERRIDE", self.MODEL_RETRAIN_HOURS)
+        self.INITIAL_SPOT_BALANCE = _env_float("INITIAL_SPOT_BALANCE_OVERRIDE", self.INITIAL_SPOT_BALANCE)
+        self.INITIAL_FUTURES_BALANCE = _env_float("INITIAL_FUTURES_BALANCE_OVERRIDE", self.INITIAL_FUTURES_BALANCE)
         self.MAX_POSITIONS_SPOT = _env_int("MAX_POSITIONS_SPOT_OVERRIDE", self.MAX_POSITIONS_SPOT)
         self.MAX_POSITIONS_FUTURES = _env_int("MAX_POSITIONS_FUTURES_OVERRIDE", self.MAX_POSITIONS_FUTURES)
         self.MAX_POSITIONS_PER_SYMBOL_SPOT = _env_int("MAX_POSITIONS_PER_SYMBOL_SPOT_OVERRIDE", self.MAX_POSITIONS_PER_SYMBOL_SPOT)
@@ -256,6 +278,10 @@ class TradingConfig:
         self.TAKE_PROFIT_PCT = _env_float("TAKE_PROFIT_PCT_OVERRIDE", self.TAKE_PROFIT_PCT)
         self.TRAILING_STOP_PCT = _env_float("TRAILING_STOP_PCT_OVERRIDE", self.TRAILING_STOP_PCT)
         self.FUTURES_STOP_LOSS = _env_float("FUTURES_STOP_LOSS_OVERRIDE", self.FUTURES_STOP_LOSS)
+        self.RISK_CHECK_INTERVAL = _env_int("RISK_CHECK_INTERVAL_OVERRIDE", self.RISK_CHECK_INTERVAL)
+
+        self.KRAKEN_FUTURES_BASE_URL = os.getenv("KRAKEN_FUTURES_BASE_URL", self.KRAKEN_FUTURES_BASE_URL).strip()
+        self.KRAKEN_FUTURES_ENABLE_REAL_ORDERS = _env_bool("KRAKEN_FUTURES_ENABLE_REAL_ORDERS", self.KRAKEN_FUTURES_ENABLE_REAL_ORDERS)
 
         if not 0 < self.MAX_POSITION_PCT <= 1.0:
             raise ValueError("MAX_POSITION_PCT must be in (0, 1]")
@@ -352,6 +378,8 @@ class Position:
     stale_since: Optional[datetime] = None
     ml_confidence: float = 0.0
     entry_reason: str = ""
+    broker_qty: float = 0.0  # Real Alpaca fill qty, if a live spot order was placed
+    kraken_order_id: str = ""  # Real Kraken Futures order id, if a live futures order was placed
 
 
 @dataclass
@@ -409,8 +437,10 @@ class MarketData:
         self.price_history[symbol].append(price)
         self.last_update[symbol] = time.time()
 
-        # Keep last 500 prices (~8 hours at 1-min)
-        if len(self.price_history[symbol]) > 500:
+        # Keep last 5000 prices. Was capped at 500 (~2.8h at the real ~20s poll
+        # cadence) while _build_training_samples assumed up to 10,000 points were
+        # available — that mismatch starved higher-stride training of samples.
+        if len(self.price_history[symbol]) > 5000:
             self.price_history[symbol].pop(0)
 
     def get_candles(self, symbol: str, period: int = 10) -> List[float]:
@@ -430,8 +460,15 @@ class MarketData:
         return candles
 
     def calculate_rsi(self, symbol: str, period: int = 14) -> float:
-        """Calculate RSI."""
-        prices = self.price_history.get(symbol, [])
+        """Calculate RSI from 10-min aggregated candles (not raw per-poll ticks).
+
+        Polling runs far faster (~20s/cycle) than raw ticks actually change on some
+        feeds, so consecutive duplicate prices in the raw list produced runs of
+        zero deltas — pinning avg_loss (or avg_gain) at exactly 0 and saturating
+        RSI to 100/0 on ~52% of logged signals. Aggregating first (same technique
+        already used by calculate_trend()) avoids that degenerate case.
+        """
+        prices = self.get_candles(symbol, 10)
         if len(prices) < period + 1:
             return 50.0
 
@@ -442,8 +479,12 @@ class MarketData:
         avg_gain = np.mean(gains)
         avg_loss = np.mean(losses)
 
+        if avg_gain == 0 and avg_loss == 0:
+            return 50.0  # No real movement — neutral, not saturated
         if avg_loss == 0:
             return 100.0
+        if avg_gain == 0:
+            return 0.0
 
         rs = avg_gain / avg_loss
         return 100 - (100 / (1 + rs))
@@ -478,7 +519,7 @@ class MarketData:
         return float(np.std(returns))
 
 # ============================================================
-# ML MODEL — 15-Indicator Momentum Suite
+# ML MODEL — 7-Indicator Momentum Suite
 # ============================================================
 
 # Import the curated indicator library
@@ -491,15 +532,15 @@ except ImportError:
         _compute_indicators = None
 
 # Canonical feature order — must match technical_indicators.compute_all_indicators keys
+# Trimmed from 15 to the 7 highest-signal indicators (see feature_engine.py).
 _ML_FEATURE_NAMES = [
-    "rsi_14", "macd_histogram", "stoch_k", "cci_20", "roc_10",
-    "momentum_10", "williams_r", "ultimate_osc", "trix_15", "cmo_14",
-    "atr_14", "trend_strength", "bb_position", "mean_reversion", "vol_ratio",
+    "rsi_14", "macd_histogram", "trix_15", "atr_14",
+    "bb_position", "mean_reversion", "vol_ratio",
 ]
 
 
 class MLModel:
-    """ML predictor using 15 curated momentum + complementary indicators."""
+    """ML predictor using 7 curated momentum + complementary indicators."""
 
     def __init__(self, model_path: str = "models/trading_model.joblib"):
         self.model_path = model_path
@@ -507,6 +548,14 @@ class MLModel:
         self.logger = logging.getLogger("TradingBot")
         self.feature_names = list(_ML_FEATURE_NAMES)
         self._active_features = None  # Feature indices after pruning (None = use all)
+
+        # Experimental "challenger" model — trained with a larger sampling stride to
+        # reduce the sample-overlap/autocorrelation that causes the production model's
+        # chronic 100% train accuracy. Never used for live trading; only for shadow
+        # evaluation via predict_challenger() so we can gather real forward performance
+        # data before ever promoting it. See TradingEngine.ml_challenger_shadow_mode.
+        self.challenger_model = None
+        self.challenger_path = model_path.replace(".joblib", "_challenger.joblib")
 
     def load_or_train(self, price_history: Dict[str, List[float]]):
         """Load existing model or train new one."""
@@ -533,6 +582,14 @@ class MLModel:
         if needs_retrain and price_history:
             self._train(price_history)
 
+        # Load persisted challenger model, if one has been accepted before (shadow-only)
+        if os.path.exists(self.challenger_path):
+            try:
+                self.challenger_model = load(self.challenger_path)
+                self.logger.info("ML challenger model loaded (shadow-only)")
+            except Exception as e:
+                self.logger.warning(f"Failed to load challenger model: {e}")
+
     def _aggregate_to_hourly(self, prices: List[float], period: int = 60) -> List[float]:
         """Aggregate 1-min prices into N-minute candle closes for less noisy training."""
         if len(prices) < period:
@@ -545,14 +602,17 @@ class MLModel:
             candles.append(prices[-1])
         return candles
 
-    def _train(self, price_history: Dict[str, List[float]]):
-        """Train direction model on 15-indicator momentum suite."""
-        self.logger.info("Training ML model on 15-indicator momentum suite...")
+    def _build_training_samples(self, price_history: Dict[str, List[float]], stride: int = 1):
+        """Extract (features, label) samples from price history across all symbols/timeframes.
 
-        if _compute_indicators is None:
-            self.logger.error("compute_all_indicators not available — cannot train")
-            return
-
+        `stride` controls the step size of the sliding window used to walk each candle
+        series. stride=1 samples every candle, which means adjacent training examples
+        share ~95% of their lookback window — a major source of sample overlap/
+        autocorrelation that inflates train accuracy. Production stays at stride=1
+        for now (see _train() docstring — stride=2/4 starved for samples on live
+        deployment given the real data volume); the challenger model uses stride=4
+        to keep validating the larger-stride approach in shadow mode.
+        """
         X, y = [], []
 
         for symbol, prices in price_history.items():
@@ -587,7 +647,7 @@ class MLModel:
             for series, target_thresh, flat_thresh in series_list:
                 if len(series) < 60:
                     continue
-                for i in range(50, len(series) - 20):
+                for i in range(50, len(series) - 20, max(1, stride)):
                     features = self._extract_features(series[:i])
                     if features is not None:
                         # Use 20 candles forward for hourly, 15 for shorter
@@ -599,6 +659,31 @@ class MLModel:
                         label = 1 if future_return > target_thresh else 0
                         X.append(features)
                         y.append(label)
+
+        return X, y
+
+    def _train(self, price_history: Dict[str, List[float]]):
+        """Train direction model on 7-indicator momentum suite.
+
+        stride=1 for now. stride=2/4 were tried (see git history / repo memory
+        cryptobot_ml_findings.md, 2026-08-09) to reduce the sample overlap that
+        causes chronic ~100% train accuracy and saturated 0.00/1.00 confidence,
+        and stride=4 was validated for a week in shadow mode as "ml_challenger"
+        (48.9% win rate vs 27.9% baseline). But live deployment showed the raw
+        price history (previously capped at 500 points/symbol) doesn't reliably
+        yield enough samples once stride>1 is combined with the existing
+        class-imbalance undersampling floor (minority_count>=50) — training was
+        skipped outright on the first two redeploy attempts. Reverted to stride=1
+        here; raised the raw history cap to 5000 (see update_price) so a future
+        stride=2/4 attempt has a much larger pool to draw from once it accumulates.
+        """
+        self.logger.info("Training ML model on 7-indicator momentum suite (stride=1)...")
+
+        if _compute_indicators is None:
+            self.logger.error("compute_all_indicators not available — cannot train")
+            return
+
+        X, y = self._build_training_samples(price_history, stride=1)
 
         if len(X) < 100:
             self.logger.warning("Insufficient data for training")
@@ -757,6 +842,23 @@ class MLModel:
             self.logger.debug(f"Feature pruning skipped: {e}")
             self._active_features = None
 
+        # Calibrate predicted probabilities against the untouched holdout set.
+        # Raw GradientBoostingClassifier.predict_proba() is not a true probability —
+        # on this small/imbalanced dataset it produces overconfident scores (e.g. 95%+)
+        # that don't match real hit rates, which silently defeats the MIN_ML_CONFIDENCE
+        # gate. Isotonic calibration on held-out data fixes that without touching the
+        # underlying decision boundary or requiring a fitted-model rewrite everywhere.
+        try:
+            from sklearn.calibration import CalibratedClassifierCV
+            from sklearn.frozen import FrozenEstimator
+            X_test_cal = X_test[:, self._active_features] if self._active_features is not None else X_test
+            calibrated = CalibratedClassifierCV(FrozenEstimator(candidate), method="isotonic")
+            calibrated.fit(X_test_cal, y_test)
+            candidate = calibrated
+            self.logger.info("Probability calibration applied (isotonic, holdout-fit)")
+        except Exception as e:
+            self.logger.warning(f"Probability calibration skipped, using raw model output: {e}")
+
         self.model = candidate
         self.logger.info(f"Model ACCEPTED: OOS accuracy {test_score:.2%}, Train={train_score:.2%}")
 
@@ -773,8 +875,129 @@ class MLModel:
         except Exception:
             pass
 
+    def _train_challenger(self, price_history: Dict[str, List[float]], stride: int = 4):
+        """Train an experimental challenger model with a larger sampling stride than
+        production (now stride=2) to continue validating the more aggressive
+        stride=4 methodology (48.9% shadow win rate vs. 27.9% baseline) before ever
+        promoting it further — stride=8 was tried and starves for samples too often
+        given real data volume, so this stays at the already-proven stride=4.
+
+        This NEVER touches self.model or the live trading decision path — it only
+        updates self.challenger_model, which is evaluated purely via shadow trades
+        (see TradingEngine._shadow_open_position("ml_challenger", ...)). Same accept/
+        reject quality gates and calibration as production so results are comparable.
+        """
+        if _compute_indicators is None:
+            return
+
+        X, y = self._build_training_samples(price_history, stride=stride)
+
+        if len(X) < 100:
+            self.logger.info(
+                f"Challenger training skipped: only {len(X)} samples at stride={stride} "
+                f"(need >=100). Keeping previous challenger model."
+            )
+            return
+
+        X, y = np.array(X), np.array(y)
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+        class_ratio = np.mean(y)
+        n_up = int(np.sum(y))
+        n_down = len(y) - n_up
+        self.logger.info(
+            f"Challenger training data: {len(y)} samples, {n_up} UP ({class_ratio:.1%}), "
+            f"{n_down} DOWN ({1 - class_ratio:.1%}) [stride={stride}]"
+        )
+
+        if class_ratio < 0.35 or class_ratio > 0.65:
+            up_idx = np.where(y == 1)[0]
+            down_idx = np.where(y == 0)[0]
+            minority_count = min(len(up_idx), len(down_idx))
+            if minority_count < 50:
+                self.logger.info("Challenger training skipped: too few minority-class samples after undersample.")
+                return
+            if len(up_idx) > len(down_idx):
+                up_idx = np.random.choice(up_idx, size=minority_count, replace=False)
+            else:
+                down_idx = np.random.choice(down_idx, size=minority_count, replace=False)
+            balanced_idx = np.concatenate([up_idx, down_idx])
+            np.random.shuffle(balanced_idx)
+            X, y = X[balanced_idx], y[balanced_idx]
+
+        from sklearn.model_selection import TimeSeriesSplit
+        from sklearn.utils.class_weight import compute_sample_weight
+
+        tscv = TimeSeriesSplit(n_splits=3, gap=max(1, int(len(X) * 0.02)))
+        fold_scores = []
+        for train_idx, test_idx in tscv.split(X):
+            X_train, X_test = X[train_idx], X[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+            sample_weights = compute_sample_weight('balanced', y_train)
+            fold_model = GradientBoostingClassifier(
+                n_estimators=150, max_depth=3, learning_rate=0.05,
+                min_samples_split=20, min_samples_leaf=10,
+                subsample=0.8, max_features=0.7, random_state=42,
+            )
+            fold_model.fit(X_train, y_train, sample_weight=sample_weights)
+            fold_scores.append(fold_model.score(X_test, y_test))
+
+        test_score = float(np.mean(fold_scores))
+        self.logger.info(
+            f"Challenger walk-forward avg OOS: {test_score:.2%} "
+            f"(folds: {[f'{s:.2%}' for s in fold_scores]})"
+        )
+
+        split_idx = int(len(X) * 0.85)
+        X_train, X_test = X[:split_idx], X[split_idx:]
+        y_train, y_test = y[:split_idx], y[split_idx:]
+        sample_weights = compute_sample_weight('balanced', y_train)
+
+        candidate = GradientBoostingClassifier(
+            n_estimators=150, max_depth=3, learning_rate=0.05,
+            min_samples_split=20, min_samples_leaf=10,
+            subsample=0.8, max_features=0.7, random_state=42,
+        )
+        candidate.fit(X_train, y_train, sample_weight=sample_weights)
+        train_score = candidate.score(X_train, y_train)
+        holdout_score = candidate.score(X_test, y_test)
+        self.logger.info(
+            f"Challenger — Train: {train_score:.2%}, Holdout: {holdout_score:.2%}, WF-avg: {test_score:.2%}"
+        )
+
+        if test_score < 0.55:
+            self.logger.info(f"Challenger REJECTED: OOS {test_score:.2%} < 55%. Keeping previous challenger model.")
+            return
+        if train_score > 0 and (train_score - test_score) > 0.25:
+            self.logger.info(
+                f"Challenger REJECTED: overfitting — Train={train_score:.2%} vs OOS={test_score:.2%} "
+                f"(gap={train_score - test_score:.2%} > 25%). Keeping previous challenger model."
+            )
+            return
+
+        try:
+            from sklearn.calibration import CalibratedClassifierCV
+            from sklearn.frozen import FrozenEstimator
+            calibrated = CalibratedClassifierCV(FrozenEstimator(candidate), method="isotonic")
+            calibrated.fit(X_test, y_test)
+            candidate = calibrated
+            self.logger.info("Challenger probability calibration applied (isotonic, holdout-fit)")
+        except Exception as e:
+            self.logger.warning(f"Challenger calibration skipped, using raw model output: {e}")
+
+        self.challenger_model = candidate
+        self.logger.info(
+            f"Challenger ACCEPTED: OOS accuracy {test_score:.2%}, Train={train_score:.2%}, stride={stride}"
+        )
+
+        try:
+            os.makedirs(os.path.dirname(self.challenger_path), exist_ok=True)
+            dump(self.challenger_model, self.challenger_path)
+        except Exception as e:
+            self.logger.debug(f"Challenger model save failed: {e}")
+
     def _extract_features(self, prices: List[float]) -> Optional[List[float]]:
-        """Extract 15 indicator features using compute_all_indicators."""
+        """Extract the 7 curated indicator features using compute_all_indicators."""
         if len(prices) < 30 or _compute_indicators is None:
             return None
 
@@ -807,6 +1030,36 @@ class MLModel:
 
         try:
             proba = self.model.predict_proba(features_arr)[0]
+        except Exception:
+            return {"direction": 0.5, "confidence": 0.5, "up_prob": 0.5}
+
+        up_prob = proba[1]
+        confidence = max(up_prob, proba[0])
+
+        return {
+            "direction": up_prob,
+            "confidence": confidence,
+            "up_prob": up_prob,
+            "down_prob": proba[0]
+        }
+
+    def predict_challenger(self, prices: List[float]) -> Dict[str, float]:
+        """Predict using the experimental (reduced-overlap) challenger model.
+
+        Shadow-evaluation only — never used to size or open real/live positions.
+        """
+        if self.challenger_model is None or len(prices) < 30:
+            return {"direction": 0.5, "confidence": 0.5, "up_prob": 0.5}
+
+        features = self._extract_features(prices)
+        if features is None:
+            return {"direction": 0.5, "confidence": 0.5, "up_prob": 0.5}
+
+        features_arr = np.array(features).reshape(1, -1)
+        features_arr = np.nan_to_num(features_arr, nan=0.0, posinf=0.0, neginf=0.0)
+
+        try:
+            proba = self.challenger_model.predict_proba(features_arr)[0]
         except Exception:
             return {"direction": 0.5, "confidence": 0.5, "up_prob": 0.5}
 
@@ -1189,6 +1442,16 @@ class TradingBot:
         self.rl_live_size_min_mult = max(0.25, min(self.rl_live_size_min_mult, 2.0))
         self.rl_live_size_max_mult = max(self.rl_live_size_min_mult, min(self.rl_live_size_max_mult, 2.0))
 
+        # ML challenger shadow mode: an experimental model (trained with reduced
+        # sample overlap) is evaluated via virtual paper trades in parallel with the
+        # production model — never affects live sizing/execution/capital. Independent
+        # of RL_SHADOW_MODE so it can run on its own.
+        self.ml_challenger_shadow_mode = os.getenv("ML_CHALLENGER_SHADOW_MODE", "false").strip().lower() == "true"
+        try:
+            self.ml_challenger_min_confidence = float(os.getenv("ML_CHALLENGER_MIN_CONFIDENCE", "0.60"))
+        except ValueError:
+            self.ml_challenger_min_confidence = 0.60
+
         initial_balance = cfg.INITIAL_SPOT_BALANCE + cfg.INITIAL_FUTURES_BALANCE
         self.shadow_initial_balance = initial_balance
         self.shadow_books: Dict[str, Dict] = {
@@ -1203,6 +1466,16 @@ class TradingBot:
                 "realized_pnl": 0.0,
             },
             "rl": {
+                "balance": initial_balance,
+                "peak_equity": initial_balance,
+                "max_drawdown_pct": 0.0,
+                "positions": {},
+                "trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "realized_pnl": 0.0,
+            },
+            "ml_challenger": {
                 "balance": initial_balance,
                 "peak_equity": initial_balance,
                 "max_drawdown_pct": 0.0,
@@ -1277,6 +1550,12 @@ class TradingBot:
                 self.logger.info("Forced ML retrain at startup completed")
             except Exception as e:
                 self.logger.warning(f"Forced ML retrain at startup failed: {e}")
+
+        if self.ml_challenger_shadow_mode:
+            try:
+                self.ml_model._train_challenger(self.market_data.price_history)
+            except Exception as e:
+                self.logger.warning(f"Challenger model startup training failed: {e}")
 
         # GPU model startup training
         if self._gpu_model is not None and not self._gpu_model.ready:
@@ -1598,7 +1877,7 @@ class TradingBot:
             book["max_drawdown_pct"] = drawdown_pct
 
     def _shadow_record_event(self, event: Dict):
-        if not self.rl_shadow_mode:
+        if not (self.rl_shadow_mode or self.ml_challenger_shadow_mode):
             return
         payload = {
             "ts": datetime.now().isoformat(),
@@ -1763,11 +2042,17 @@ class TradingBot:
         })
 
     def _shadow_check_risk(self):
-        """Apply baseline risk exit logic to both shadow books under same fill model."""
-        if not self.rl_shadow_mode:
+        """Apply baseline risk exit logic to all active shadow books under same fill model."""
+        if not (self.rl_shadow_mode or self.ml_challenger_shadow_mode):
             return
 
-        for strategy in ("baseline", "rl"):
+        active_strategies = []
+        if self.rl_shadow_mode:
+            active_strategies.extend(["baseline", "rl"])
+        if self.ml_challenger_shadow_mode:
+            active_strategies.append("ml_challenger")
+
+        for strategy in active_strategies:
             book = self.shadow_books[strategy]
             for position_key, position in list(book["positions"].items()):
                 hist = self.market_data.price_history.get(position.symbol, [])
@@ -1915,10 +2200,51 @@ class TradingBot:
         except Exception as e:
             self.logger.warning(f"RL shadow report save failed: {e}")
 
+    def _persist_ml_challenger_report(self):
+        """Persist the ml_challenger shadow book so its live-vs-production comparison
+        can be checked independently of RL shadow mode."""
+        if not self.ml_challenger_shadow_mode:
+            return
+
+        try:
+            os.makedirs("data/state", exist_ok=True)
+            book = self.shadow_books["ml_challenger"]
+            positions = {sym: asdict(pos) for sym, pos in book["positions"].items()}
+            challenger_events = [
+                e for e in self.rl_shadow_recent_events
+                if e.get("strategy") == "ml_challenger"
+            ][-80:]
+
+            report = {
+                "updated_at": datetime.now().isoformat(),
+                "cycle": self.cycle,
+                "mode": "shadow",
+                "min_confidence": self.ml_challenger_min_confidence,
+                "challenger_model_loaded": self.ml_model.challenger_model is not None,
+                "book": {
+                    "balance": round(book["balance"], 6),
+                    "equity": round(self._shadow_mark_equity("ml_challenger"), 6),
+                    "peak_equity": round(book["peak_equity"], 6),
+                    "max_drawdown_pct": round(book["max_drawdown_pct"], 4),
+                    "trades": int(book["trades"]),
+                    "wins": int(book["wins"]),
+                    "losses": int(book["losses"]),
+                    "win_rate": round((book["wins"] / max(book["trades"], 1)) * 100.0, 2),
+                    "realized_pnl": round(book["realized_pnl"], 6),
+                    "positions": positions,
+                },
+                "recent_events": challenger_events,
+            }
+            with open("data/state/ml_challenger_shadow_report.json", "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+        except Exception as e:
+            self.logger.warning(f"ML challenger shadow report save failed: {e}")
+
     def _init_api(self):
         """Initialize Alpaca crypto API session."""
         api_key = os.getenv("ALPACA_API_KEY")
         api_secret = os.getenv("ALPACA_API_SECRET")
+        self.trading_client = None
 
         if not api_key or not api_secret:
             self.logger.warning("Alpaca credentials missing; using public price fallbacks only")
@@ -1943,6 +2269,148 @@ class TradingBot:
             self.logger.error(f"Alpaca API connection failed: {e}")
             if not cfg.PAPER_TRADING:
                 raise
+
+        # Real order execution client (spot crypto longs only — Alpaca doesn't
+        # support crypto shorting or leveraged futures)
+        if ALPACA_TRADING_SDK_AVAILABLE:
+            try:
+                self.trading_client = TradingClient(
+                    api_key=api_key,
+                    secret_key=api_secret,
+                    paper=cfg.PAPER_TRADING,
+                )
+                self.trading_client.get_account()
+                self.logger.info(f"Alpaca trading client connected ({'PAPER' if cfg.PAPER_TRADING else 'LIVE'}) — real spot orders enabled")
+            except Exception as e:
+                self.trading_client = None
+                self.logger.error(f"Alpaca trading client init failed — spot orders will be simulated only: {e}")
+        else:
+            self.logger.warning("alpaca-py trading SDK not available — spot orders will be simulated only")
+
+        self._init_kraken_futures()
+
+    def _init_kraken_futures(self):
+        """Initialize Kraken Futures order-execution client. Read-only auth check only —
+        real order placement stays gated behind cfg.KRAKEN_FUTURES_ENABLE_REAL_ORDERS."""
+        self.kraken_futures_client = None
+        kraken_key = os.getenv("KRAKEN_API_KEY")
+        kraken_secret = os.getenv("KRAKEN_API_SECRET")
+        if not kraken_key or not kraken_secret:
+            self.logger.info("Kraken API credentials not set — futures remain simulated only")
+            return
+
+        # Verify which environment the credentials belong to via a read-only account check
+        # (never places an order) — try the configured URL first, then the other environment.
+        from core.kraken_futures_client import DEMO_BASE_URL, LIVE_BASE_URL
+        candidates = [cfg.KRAKEN_FUTURES_BASE_URL]
+        for alt in (DEMO_BASE_URL, LIVE_BASE_URL):
+            if alt not in candidates:
+                candidates.append(alt)
+
+        for base_url in candidates:
+            try:
+                client = KrakenFuturesClient(kraken_key, kraken_secret, base_url)
+                accounts = client.get_accounts()
+                if accounts.get("result") == "success":
+                    env_label = "DEMO" if "demo-futures" in base_url else "LIVE"
+                    self.kraken_futures_client = client
+                    cfg.KRAKEN_FUTURES_BASE_URL = base_url
+                    real_orders = cfg.KRAKEN_FUTURES_ENABLE_REAL_ORDERS
+                    self.logger.info(
+                        f"Kraken Futures client connected ({env_label}) — "
+                        f"real orders {'ENABLED' if real_orders else 'disabled (simulation only)'}"
+                    )
+                    if env_label == "LIVE" and real_orders:
+                        self.logger.warning("KRAKEN FUTURES: LIVE environment with real orders ENABLED — real money at risk")
+                    return
+                self.logger.warning(f"Kraken Futures auth check failed on {base_url}: {accounts.get('error') or accounts}")
+            except Exception as e:
+                self.logger.warning(f"Kraken Futures auth check errored on {base_url}: {e}")
+
+        self.logger.error("Kraken Futures credentials did not authenticate on demo or live — futures remain simulated only")
+
+    def _kraken_open_futures(self, symbol: str, side: str, size_usd: float, price: float) -> str:
+        """Submit a real Kraken Futures market order to open/add to a position.
+        Returns the order id, or '' if disabled/unavailable/failed."""
+        if not cfg.KRAKEN_FUTURES_ENABLE_REAL_ORDERS or not self.kraken_futures_client:
+            return ""
+        try:
+            contracts = max(1, round(size_usd / max(price, 1e-9)))
+            result = self.kraken_futures_client.send_order(symbol=symbol, side=side, size=contracts, order_type="mkt")
+            status = result.get("sendStatus", {})
+            order_id = status.get("order_id", "")
+            self.logger.info(f"KRAKEN ORDER: {side.upper()} {symbol} size={contracts} order_id={order_id} status={status.get('status')}")
+            return order_id
+        except Exception as e:
+            self.logger.error(f"KRAKEN ORDER FAILED: {side.upper()} {symbol} size_usd=${size_usd:.2f}: {e}")
+            return ""
+
+    def _kraken_close_futures(self, symbol: str, side: str, size_usd: float, price: float) -> bool:
+        """Submit a real Kraken Futures reduce-only market order to close a position."""
+        if not cfg.KRAKEN_FUTURES_ENABLE_REAL_ORDERS or not self.kraken_futures_client:
+            return False
+        try:
+            contracts = max(1, round(size_usd / max(price, 1e-9)))
+            result = self.kraken_futures_client.send_order(
+                symbol=symbol, side=side, size=contracts, order_type="mkt", reduce_only=True,
+            )
+            status = result.get("sendStatus", {})
+            self.logger.info(f"KRAKEN ORDER: CLOSE {symbol} side={side} size={contracts} status={status.get('status')}")
+            return True
+        except Exception as e:
+            self.logger.error(f"KRAKEN ORDER FAILED: CLOSE {symbol} size_usd=${size_usd:.2f}: {e}")
+            return False
+
+    def _alpaca_buy_spot(self, symbol: str, notional: float) -> float:
+        """Submit a real Alpaca market buy for a spot crypto symbol. Returns filled qty (0.0 on failure)."""
+        if not self.trading_client:
+            return 0.0
+        try:
+            order = self.trading_client.submit_order(MarketOrderRequest(
+                symbol=symbol,
+                notional=round(notional, 2),
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.GTC,
+            ))
+            # Crypto market orders usually fill near-instantly; poll briefly for the fill qty
+            for _ in range(3):
+                filled = getattr(order, "filled_qty", None)
+                if filled and float(filled) > 0:
+                    self.logger.info(f"ALPACA ORDER: BUY {symbol} filled_qty={filled} order_id={order.id}")
+                    return float(filled)
+                time.sleep(1)
+                order = self.trading_client.get_order_by_id(order.id)
+            self.logger.warning(f"ALPACA ORDER: BUY {symbol} submitted (id={order.id}) but no fill qty yet")
+            return float(getattr(order, "filled_qty", 0) or 0)
+        except Exception as e:
+            self.logger.error(f"ALPACA ORDER FAILED: BUY {symbol} notional=${notional:.2f}: {e}")
+            return 0.0
+
+    def _alpaca_sell_spot(self, symbol: str, qty: float) -> bool:
+        """Submit a real Alpaca market sell to close a spot crypto position."""
+        if not self.trading_client or qty <= 0:
+            return False
+        # Crypto trading fees are deducted from the base asset, so the tracked fill
+        # qty can slightly exceed what's actually held — clamp to the real balance.
+        try:
+            position = self.trading_client.get_open_position(symbol.replace("/", ""))
+            available = float(getattr(position, "qty_available", None) or position.qty)
+            if available > 0:
+                qty = min(qty, available)
+        except Exception:
+            pass
+        try:
+            order = self.trading_client.submit_order(MarketOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.GTC,
+            ))
+            self.logger.info(f"ALPACA ORDER: SELL {symbol} qty={qty} order_id={order.id}")
+            return True
+        except Exception as e:
+            self.logger.error(f"ALPACA ORDER FAILED: SELL {symbol} qty={qty}: {e}")
+            return False
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown gracefully."""
@@ -2588,6 +3056,12 @@ class TradingBot:
         except Exception as e:
             self.logger.warning(f"Scheduled retrain failed: {e}")
 
+        if self.ml_challenger_shadow_mode:
+            try:
+                self.ml_model._train_challenger(self.market_data.price_history)
+            except Exception as e:
+                self.logger.warning(f"Scheduled challenger retrain failed: {e}")
+
         # GPU model retrain alongside sklearn
         if self._gpu_model is not None:
             try:
@@ -2807,6 +3281,13 @@ class TradingBot:
 
         is_futures = symbol.startswith("PI_")
         fill_price = self._apply_slippage(price, position.direction, is_entry=False, is_futures=is_futures)
+
+        # Close the matching real Alpaca order, if one was opened
+        if position.broker_qty > 0:
+            self._alpaca_sell_spot(symbol, position.broker_qty)
+        elif is_futures and position.kraken_order_id:
+            kraken_close_side = "sell" if position.direction == "LONG" else "buy"
+            self._kraken_close_futures(symbol, kraken_close_side, position.size, fill_price)
 
         # Calculate P&L value
         if position.direction == "LONG":
@@ -3594,6 +4075,32 @@ class TradingBot:
             if rl_trade and rl_size >= min_trade_size:
                 self._shadow_open_position("rl", signal, rl_size, rl_decision=rl_decision)
 
+            # ML challenger shadow tracking — an experimental, reduced-overlap model
+            # evaluated purely via virtual paper trades. Never affects live sizing/
+            # execution/capital. Opens only when the challenger's OWN (calibrated)
+            # confidence backs this same direction, so we can compare its real
+            # forward performance against production before ever trusting it live.
+            if self.ml_challenger_shadow_mode and self.ml_model.challenger_model is not None:
+                challenger_hist = self.market_data.price_history.get(signal.symbol, [])
+                challenger_pred = self.ml_model.predict_challenger(challenger_hist)
+                challenger_up = challenger_pred.get("up_prob", 0.5)
+                challenger_conf = challenger_pred.get("confidence", 0.5)
+                challenger_agrees = (
+                    (signal.direction == "LONG" and challenger_up >= 0.5) or
+                    (signal.direction == "SHORT" and challenger_up < 0.5)
+                )
+                if challenger_agrees and challenger_conf >= self.ml_challenger_min_confidence:
+                    self._shadow_open_position("ml_challenger", signal, size)
+                    self._shadow_record_event({
+                        "type": "decision",
+                        "strategy": "ml_challenger",
+                        "symbol": signal.symbol,
+                        "direction": signal.direction,
+                        "ml_challenger": "OPEN",
+                        "challenger_confidence": round(float(challenger_conf), 4),
+                        "production_confidence": round(float(signal.confidence), 4),
+                    })
+
             self._shadow_record_event({
                 "type": "decision",
                 "symbol": signal.symbol,
@@ -3646,6 +4153,13 @@ class TradingBot:
                     self.balance_futures -= fee
                 else:
                     self.balance_spot -= fee
+
+            # Real order on Alpaca — spot longs only (Alpaca has no crypto shorting/futures)
+            if not is_futures and signal.direction == "LONG":
+                position.broker_qty = self._alpaca_buy_spot(signal.symbol, size)
+            elif is_futures:
+                kraken_side = "buy" if signal.direction == "LONG" else "sell"
+                position.kraken_order_id = self._kraken_open_futures(signal.symbol, kraken_side, size, price)
 
             position_key = self._next_position_key(signal.symbol)
             self.positions[position_key] = position
@@ -3729,6 +4243,7 @@ class TradingBot:
                 if self.cycle % 10 == 0:
                     self._save_state()
                     self._persist_rl_shadow_report()
+                    self._persist_ml_challenger_report()
 
                 # Sleep
                 for _ in range(cfg.RISK_CHECK_INTERVAL):
@@ -3742,6 +4257,7 @@ class TradingBot:
 
         self.logger.info("Bot stopped gracefully")
         self._persist_rl_shadow_report()
+        self._persist_ml_challenger_report()
         self._save_state()
 
 # ============================================================

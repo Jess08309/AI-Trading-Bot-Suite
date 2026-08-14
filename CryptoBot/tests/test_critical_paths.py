@@ -176,9 +176,9 @@ class TestFeatureEngine(unittest.TestCase):
         return FeatureEngine(lookback=30, prediction_horizon=5)
 
     def test_feature_names_count(self):
-        """FEATURE_NAMES must have exactly 15 features."""
+        """FEATURE_NAMES must have exactly 7 features (trimmed from 15)."""
         from cryptotrades.utils.feature_engine import FEATURE_NAMES
-        self.assertEqual(len(FEATURE_NAMES), 15)
+        self.assertEqual(len(FEATURE_NAMES), 7)
 
     def test_features_to_array_length(self):
         """features_to_array must produce array with len == FEATURE_NAMES."""
