@@ -49,6 +49,15 @@ class RiskManager:
     RAPID_FIRE_WINDOW = 1200     # 20 minutes
     RAPID_FIRE_THRESHOLD = 3     # 3 losses in 20 min = extra 10-min cooldown
 
+    # FINRA retired the PDT trade-counting/$25k rule, replacing it with a
+    # risk-based intraday margin framework (SEC-approved 2026-04-14, effective
+    # 2026-06-04; brokers have until 2027-10-20 to fully migrate). Off by
+    # default; flip PDT_GUARD_ENABLED=true if a broker still enforces the old
+    # rule during its transition window.
+    PDT_GUARD_ENABLED = os.getenv("PDT_GUARD_ENABLED", "false").strip().lower() in ("true", "1", "yes")
+    PDT_EQUITY_THRESHOLD = 25_000.0
+    PDT_DAY_TRADE_LIMIT = 3   # block new entries once this many day trades are used up
+
     def __init__(self, config: Config):
         self.config = config
 
@@ -133,14 +142,56 @@ class RiskManager:
 
         return True, "OK"
 
-    def can_open_position(self, num_open: int) -> tuple:
-        """Check if we can open another position."""
+    def can_open_position(self, num_open: int, account: Optional[Dict[str, Any]] = None) -> tuple:
+        """Check if we can open another position.
+
+        account: optional dict from AlpacaAPI.get_account() — when provided,
+        enforces a Pattern Day Trader (PDT) guard using live broker data.
+        """
         if num_open >= self.config.MAX_POSITIONS:
             return False, f"Max positions ({self.config.MAX_POSITIONS}) reached"
 
         can, reason = self.can_trade()
         if not can:
             return False, reason
+
+        if account is not None:
+            can_pdt, reason_pdt = self.check_pdt_guard(account)
+            if not can_pdt:
+                return False, reason_pdt
+
+        return True, "OK"
+
+    def check_pdt_guard(self, account: Dict[str, Any]) -> tuple:
+        """Pattern Day Trader guard.
+
+        Accounts with equity >= $25k are exempt from the PDT restriction.
+        Below that, a margin account is limited to 3 day trades per rolling
+        5 business days — a 4th trips the PDT flag and freezes the account.
+        This bot scalps short-hold options, so most trades risk becoming a
+        same-day round trip. Rather than let the broker reject/flag the
+        account, we proactively block new entries before that happens.
+
+        Uses Alpaca's own `day_trade_count` (rolling 5-day count) and
+        `pattern_day_trader` flag returned by get_account() — no local
+        tracking needed since the broker already computes this.
+        """
+        if not self.PDT_GUARD_ENABLED:
+            return True, "OK"
+
+        equity = account.get("equity", 0) or 0
+        if equity >= self.PDT_EQUITY_THRESHOLD:
+            return True, "OK"
+
+        if account.get("pattern_day_trader"):
+            return False, "PDT: account flagged pattern day trader — new entries blocked"
+
+        day_trade_count = account.get("day_trade_count", 0) or 0
+        if day_trade_count >= self.PDT_DAY_TRADE_LIMIT:
+            return False, (
+                f"PDT: {day_trade_count} day trades used (limit {self.PDT_DAY_TRADE_LIMIT} "
+                f"for equity < ${self.PDT_EQUITY_THRESHOLD:,.0f}) — blocking new entries"
+            )
 
         return True, "OK"
 

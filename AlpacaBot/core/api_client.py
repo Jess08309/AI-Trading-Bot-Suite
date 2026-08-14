@@ -105,7 +105,7 @@ class AlpacaAPI:
             "cash": float(acct.cash),
             "buying_power": float(acct.buying_power),
             "portfolio_value": float(acct.portfolio_value),
-            "day_trade_count": int(acct.daytrade_count),
+            "day_trade_count": int(acct.daytrade_count or 0),
             "pattern_day_trader": acct.pattern_day_trader,
             "trading_blocked": acct.trading_blocked,
             "account_blocked": acct.account_blocked,
@@ -311,14 +311,19 @@ class AlpacaAPI:
         try:
             self._throttle()
             order = self.trading.get_order_by_id(order_id)
+            # order.side/order.status are enums (e.g. OrderStatus.FILLED); str() on
+            # an enum yields "OrderStatus.FILLED", not "filled", which breaks any
+            # `== "filled"` fill-check downstream. Use .value to get the raw string.
+            side = order.side.value if order.side is not None else None
+            status = order.status.value if order.status is not None else None
             return {
                 "id": str(order.id),
                 "symbol": order.symbol,
-                "side": str(order.side),
+                "side": side,
                 "qty": float(order.qty) if order.qty else 0,
                 "filled_qty": float(order.filled_qty) if order.filled_qty else 0,
                 "filled_avg_price": float(order.filled_avg_price) if order.filled_avg_price else 0,
-                "status": str(order.status),
+                "status": status,
                 "submitted_at": str(order.submitted_at),
             }
         except Exception as e:

@@ -1,0 +1,14 @@
+[Unit]
+Description=AlpacaBot Monitor (snapshot account + positions)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=botuser
+Group=botuser
+WorkingDirectory=/home/botuser/AI-Trading-Bot-Suite/AlpacaBot
+ExecStart=/home/botuser/AI-Trading-Bot-Suite/AlpacaBot/.venv/bin/python tools/monitor.py
+
+[Install]
+WantedBy=multi-user.target

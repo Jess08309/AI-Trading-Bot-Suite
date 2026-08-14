@@ -307,7 +307,13 @@ class ScalpTradingEngine:
             acct = self.api.get_account()
             allocated = acct["portfolio_value"] * self.config.ALLOCATION_PCT
             self.risk.current_balance = allocated
-            if allocated > self.risk.peak_balance:
+            # peak_balance defaults to config.INITIAL_BALANCE (a standalone-account
+            # assumption) which is on a totally different basis than `allocated`
+            # (a % slice of a shared account) — comparing the two produced a
+            # permanent, misleading ~90%+ "drawdown" that never reflected real
+            # trading losses. Re-baseline peak_balance the first time we get a
+            # real allocated figure; ratchet up normally after that.
+            if self.risk.peak_balance == self.config.INITIAL_BALANCE or allocated > self.risk.peak_balance:
                 self.risk.peak_balance = allocated
             self._log_activity(f"Account: ${acct['portfolio_value']:,.2f} equity, ${acct['buying_power']:,.2f} buying power")
             self._log_activity(f"AlpacaBot allocation ({self.config.ALLOCATION_PCT:.0%}): ${allocated:,.2f}")
@@ -1008,10 +1014,14 @@ class ScalpTradingEngine:
         Returns (can_trade, exposure_pct).
         """
         PORTFOLIO_MAX_PCT = 0.50  # 50% of equity (combined allocation: PS 35% + CB 15% + AB 0%)
+        # Cross-platform path resolution (works on both Windows C:\ and Linux /home/botuser/).
+        # Was hardcoded to C:\PutSeller\..., C:\CallBuyer\..., C:\AlpacaBot\... which never
+        # exist on the Linux droplet — this cap has been silently a no-op in production.
+        _base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         POSITION_FILES = {
-            r"C:\PutSeller\data\state\positions.json": "max_loss_total",
-            r"C:\CallBuyer\data\state\positions.json": "entry_total",
-            r"C:\AlpacaBot\data\state\positions.json": "cost",
+            os.path.join(_base, "PutSeller", "data", "state", "positions.json"): "max_loss_total",
+            os.path.join(_base, "CallBuyer", "data", "state", "positions.json"): "entry_total",
+            os.path.join(_base, "AlpacaBot", "data", "state", "positions.json"): "cost",
         }
         try:
             acct = self.api.get_account()
@@ -1046,7 +1056,13 @@ class ScalpTradingEngine:
         """Scan for scalp signals — fixed watchlist + scanner universe — and open positions."""
         self.last_signal_check = datetime.now()
 
-        can_trade, reason = self.risk.can_open_position(len(self.positions))
+        try:
+            acct = self.api.get_account()
+        except Exception as e:
+            log.debug(f"PDT/account check failed (proceeding without guard): {e}")
+            acct = None
+
+        can_trade, reason = self.risk.can_open_position(len(self.positions), account=acct)
         if not can_trade:
             # ── Shadow Scanner: keep scanning during cooldown/hard stop, log what we'd trade ──
             if "Cooldown" in reason or "HARD STOP" in reason:

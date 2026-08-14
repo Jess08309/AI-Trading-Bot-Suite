@@ -38,6 +38,7 @@ TRAILING_STOP_PCT = 0.20      # 20% from peak
 MAX_HOLD_DAYS = 7
 MIN_ML_CONFIDENCE = 0.52      # Lowered: more trades
 MAX_COST_PER_TRADE = 0.25     # Max 25% of balance per trade
+FEE_PER_CONTRACT = 0.65       # options commission per contract per side
 
 # ── ML / Signal Config ──
 MIN_RSI_LONG = 25.0
@@ -329,7 +330,8 @@ def run_backtest():
         # Process exits (reverse order to maintain indices)
         for i, reason in sorted(exits, reverse=True):
             pos = positions.pop(i)
-            pnl = (pos["current_value"] - pos["premium"]) * 100 * pos["qty"]
+            fees = 2 * FEE_PER_CONTRACT * pos["qty"]  # entry + exit commissions
+            pnl = (pos["current_value"] - pos["premium"]) * 100 * pos["qty"] - fees
             pnl_pct = (pos["current_value"] - pos["premium"]) / pos["premium"]
             balance += pnl
             
@@ -384,8 +386,10 @@ def run_backtest():
             if day_idx < LOOKBACK or day_idx >= len(prices):
                 continue
             
-            # Compute indicators
-            chunk = prices[day_idx - LOOKBACK:day_idx + 1]
+            # Compute indicators on data known BEFORE today — including
+            # prices[day_idx] would leak today's close into a signal that
+            # trades at today's close (look-ahead bias).
+            chunk = prices[day_idx - LOOKBACK:day_idx]
             indicators = compute_all_indicators(chunk)
             
             # Get signal
@@ -410,9 +414,10 @@ def run_backtest():
                 if confidence < MIN_ML_CONFIDENCE:
                     continue
             
-            # Price and premium
+            # Price and premium (fill at today's price; signal used only
+            # data through yesterday's close)
             current_price = prices[day_idx]
-            iv = estimate_iv(prices[:day_idx + 1])
+            iv = estimate_iv(prices[:day_idx])
             premium = estimate_premium(current_price, iv, TARGET_DTE)
             
             # Position sizing

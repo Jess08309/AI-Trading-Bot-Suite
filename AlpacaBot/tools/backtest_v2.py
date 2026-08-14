@@ -37,6 +37,7 @@ OTM_PCT = 0.02          # 2% out of the money (near ATM)
 
 # Risk management
 MAX_RISK_PER_TRADE = 0.06    # Risk max 6% of balance per trade
+FEE_PER_CONTRACT = 0.65      # options commission per contract per side
 MAX_POSITIONS = 3
 STOP_LOSS = -0.25            # -25% of premium paid
 TAKE_PROFIT = 0.50           # +50% of premium paid
@@ -276,7 +277,8 @@ def run_backtest(initial_balance=5000, dte_override=None):
         for i, reason in sorted(to_exit, reverse=True):
             pos = positions.pop(i)
             pnl_per_share = pos["current_value"] - pos["premium"]
-            pnl = pnl_per_share * 100 * pos["qty"]
+            fees = 2 * FEE_PER_CONTRACT * pos["qty"]  # entry + exit commissions
+            pnl = pnl_per_share * 100 * pos["qty"] - fees
             pnl_pct = pnl_per_share / pos["premium"]
             balance += pnl
             
@@ -328,7 +330,9 @@ def run_backtest(initial_balance=5000, dte_override=None):
             if day < LOOKBACK or day >= len(prices):
                 continue
             
-            chunk = prices[day - LOOKBACK:day + 1]
+            # Signal from data known BEFORE today — including prices[day]
+            # would leak today's close into a trade filled at today's close.
+            chunk = prices[day - LOOKBACK:day]
             indicators = compute_all_indicators(chunk)
             direction, score = generate_signal(chunk, indicators)
             
@@ -337,7 +341,7 @@ def run_backtest(initial_balance=5000, dte_override=None):
             
             # Price option
             S = prices[day]
-            iv = historical_iv(prices[:day + 1])
+            iv = historical_iv(prices[:day])
             
             # OTM strike
             if direction == "call":
@@ -386,7 +390,7 @@ def run_backtest(initial_balance=5000, dte_override=None):
         days_held = final - pos["entry_day"]
         remaining = max(0.5, (pos["dte"] - days_held)) / 365.0
         exit_val = price_option(S, pos["strike"], remaining, pos["iv"], pos["type"])
-        pnl = (exit_val - pos["premium"]) * 100 * pos["qty"]
+        pnl = (exit_val - pos["premium"]) * 100 * pos["qty"] - 2 * FEE_PER_CONTRACT * pos["qty"]
         pnl_pct = (exit_val - pos["premium"]) / pos["premium"]
         balance += pnl
         trades.append({

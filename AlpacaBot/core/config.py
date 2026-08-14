@@ -77,7 +77,8 @@ class Config:
 
     # -- Capital --
     INITIAL_BALANCE: float = _env("INITIAL_BALANCE", 50000.0, float)
-    ALLOCATION_PCT: float = _env("ALLOCATION_PCT", 0.00, float)   # 0% — bot lost 89%, capital redirected to IronCondor
+    # HIGH-CONVICTION profile — larger per-trade allocation to enable fewer, higher-notional trades
+    ALLOCATION_PCT: float = _env("ALLOCATION_PCT", 0.20, float)  # 20% allocation (was 5%)
 
     # -- Symbols (top KEEP winners from DTE sweep backtest) --
     WATCHLIST: List[str] = field(default_factory=lambda: [
@@ -92,14 +93,14 @@ class Config:
         # AVGO removed — call P&L -$1,725, PF 0.24
     ])
 
-    # -- Options Parameters (SCALP) --
+    # -- Options Parameters (HIGH-CONVICTION) --
     MIN_DTE: int = _env("MIN_DTE", 1, int)           # NEVER 0DTE
-    MAX_DTE: int = _env("MAX_DTE", 31, int)           # F needs 30DTE
-    TARGET_DTE: int = _env("TARGET_DTE", 2, int)      # 2DTE = proven sweet spot (fallback)
+    MAX_DTE: int = _env("MAX_DTE", 45, int)           # allow longer-dated expirations for larger premium
+    TARGET_DTE: int = _env("TARGET_DTE", 7, int)      # target 7DTE for larger premium capture
 
     # Strike selection — ITM preferred (higher delta ~0.65-0.75, follows underlying better)
-    MAX_OTM_PCT: float = _env("MAX_OTM_PCT", 0.01, float)    # allow up to 1% OTM (was 4% OTM)
-    TARGET_ITM_PCT: float = _env("TARGET_ITM_PCT", 0.03, float)  # target 3% ITM (delta ~0.65-0.75)
+    MAX_OTM_PCT: float = _env("MAX_OTM_PCT", 0.05, float)    # allow up to 5% OTM (wider for larger premiums)
+    TARGET_ITM_PCT: float = _env("TARGET_ITM_PCT", 0.05, float)  # target 5% ITM for higher premium exposure
     PREFER_ATM: bool = _env("PREFER_ATM", False, bool)       # ITM scoring used instead
 
     # Minimum open interest / volume for liquidity
@@ -107,11 +108,11 @@ class Config:
     MIN_VOLUME: int = _env("MIN_VOLUME", 10, int)
     MAX_BID_ASK_SPREAD_PCT: float = _env("MAX_BID_ASK_SPREAD", 0.15, float)
 
-    # -- Position Sizing (SCALP) --
-    MAX_POSITION_PCT: float = _env("MAX_POSITION_PCT", 0.04, float)   # 4% per trade (reduced from 5%)
-    MIN_POSITION_PCT: float = _env("MIN_POSITION_PCT", 0.02, float)   # 2% floor
-    MAX_POSITIONS: int = _env("MAX_POSITIONS", 5, int)                 # max concurrent
-    MAX_OPENS_PER_CYCLE: int = _env("MAX_OPENS_PER_CYCLE", 1, int)     # 1 new open per scan cycle (reduced from 2)
+    # -- Position Sizing (HIGH-CONVICTION) --
+    MAX_POSITION_PCT: float = _env("MAX_POSITION_PCT", 0.15, float)   # 15% per trade (larger notional)
+    MIN_POSITION_PCT: float = _env("MIN_POSITION_PCT", 0.05, float)   # 5% floor
+    MAX_POSITIONS: int = _env("MAX_POSITIONS", 3, int)                 # fewer concurrent positions
+    MAX_OPENS_PER_CYCLE: int = _env("MAX_OPENS_PER_CYCLE", 2, int)     # allow up to 2 new opens per scan cycle
     MAX_PORTFOLIO_RISK_PCT: float = _env("MAX_PORTFOLIO_RISK", 0.50, float)
 
     # -- Signal Parameters --
@@ -119,19 +120,19 @@ class Config:
     SIGNAL_CHECK_BARS: int = _env("SIGNAL_CHECK_BARS", 2, int)  # check every 2 bars (20 min)
     COOLDOWN_BARS: int = _env("COOLDOWN_BARS", 6, int)  # 1 hour cooldown after exit
 
-    # -- Direction Filter (diagnostic: disable PUT signals temporarily) --
-    PUTS_ENABLED: bool = _env("PUTS_ENABLED", False, bool)   # Disabled — 18% WR (12W/54L), catastrophic performance
+    # -- Direction Filter --
+    PUTS_ENABLED: bool = _env("PUTS_ENABLED", True, bool)   # Re-enabled so both sides are evaluated instead of filtering out every put setup
     CALLS_ENABLED: bool = _env("CALLS_ENABLED", True, bool)
 
     # -- Level 3: Multi-Leg Strategies --
     SPREADS_ENABLED: bool = _env("SPREADS_ENABLED", True, bool)       # Vertical spreads (capital efficient, defined risk)
     IRON_CONDOR_ENABLED: bool = _env("IRON_CONDOR", False, bool)      # Iron condors in neutral regime (future)
 
-    # -- Exit Rules (SCALP - tight, for single-leg options) --
-    STOP_LOSS_PCT: float = _env("STOP_LOSS_PCT", -0.12, float)       # -12% of premium — tighter cut
-    TAKE_PROFIT_PCT: float = _env("TAKE_PROFIT_PCT", 0.30, float)    # +30% of premium — let winners run (2.5:1 R:R)
-    TRAILING_STOP_PCT: float = _env("TRAILING_STOP_PCT", 0.08, float)  # 8% from peak (tighter trail)
-    TRAILING_TRIGGER: float = _env("TRAILING_TRIGGER", 0.10, float)  # trigger at +10%
+    # -- Exit Rules (HIGH-CONVICTION - wider margins) --
+    STOP_LOSS_PCT: float = _env("STOP_LOSS_PCT", -0.20, float)       # -20% of premium — allow more room on larger trades
+    TAKE_PROFIT_PCT: float = _env("TAKE_PROFIT_PCT", 0.50, float)    # +50% of premium target (bigger winners)
+    TRAILING_STOP_PCT: float = _env("TRAILING_STOP_PCT", 0.12, float)  # 12% from peak
+    TRAILING_TRIGGER: float = _env("TRAILING_TRIGGER", 0.15, float)  # trigger at +15%
     MIN_DTE_EXIT: int = _env("MIN_DTE_EXIT", 0, int)                  # exit on expiry day
     MAX_HOLD_DAYS: int = _env("MAX_HOLD_DAYS", 3, int)                # 3 day default (DTE-dependent)
 
@@ -143,7 +144,7 @@ class Config:
     SPREAD_NEAREXP_TRAIL_PCT: float = _env("SPREAD_NE_TRAIL", 0.10, float)   # Tighten to 10% near expiry (≤1 DTE)
 
     # -- Circuit Breakers --
-    MAX_DAILY_LOSS_PCT: float = _env("MAX_DAILY_LOSS", -0.03, float)   # -3% daily (tighter)
+    MAX_DAILY_LOSS_PCT: float = _env("MAX_DAILY_LOSS", -0.05, float)   # -5% daily (looser for high-conviction)
     MAX_DRAWDOWN_PCT: float = _env("MAX_DRAWDOWN", -0.15, float)
     MAX_CONSECUTIVE_LOSSES: int = _env("MAX_CONSEC_LOSSES", 5, int)    # 5 — gives room to recover
     PAUSE_AFTER_BREAKER_MIN: int = _env("PAUSE_MINUTES", 60, int)     # 1 hour pause (was 30m)

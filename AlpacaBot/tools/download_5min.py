@@ -2,7 +2,7 @@
 Download 5-minute bars for scalp backtesting.
 Gets 90 days of 5-min data from Alpaca for each symbol.
 """
-import sys, os
+import sys, os, argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import datetime, timedelta
@@ -16,7 +16,12 @@ load_dotenv()
 API_KEY = os.getenv("ALPACA_API_KEY")
 API_SECRET = os.getenv("ALPACA_API_SECRET")
 
-SYMBOLS = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA"]
+parser = argparse.ArgumentParser()
+parser.add_argument("--symbols", type=str, default="SPY,QQQ,AAPL,MSFT,NVDA",
+                     help="Comma-separated symbols to download")
+args = parser.parse_args()
+
+SYMBOLS = [s.strip().upper() for s in args.symbols.split(",")]
 os.makedirs("data/historical", exist_ok=True)
 
 client = StockHistoricalDataClient(API_KEY, API_SECRET)
