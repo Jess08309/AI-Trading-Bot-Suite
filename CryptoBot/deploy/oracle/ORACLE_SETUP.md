@@ -107,20 +107,34 @@ ssh -i "$env:USERPROFILE\.ssh\oracle_bot_key" botuser@<YOUR_SERVER_IP>
 
 ## Step 6: Run the Deploy Script
 
-On your Windows machine:
-
+From **Windows** (PowerShell):
 ```powershell
-cd C:\Bot\deploy\oracle
+cd C:\path\to\AI-Trading-Bot-Suite\CryptoBot\deploy\oracle
 .\deploy.ps1 -ServerIP <YOUR_SERVER_IP> -FirstDeploy -SyncState
 ```
 
-This will:
-1. Push your latest code to GitHub
+From **Linux/macOS/a GitHub Codespace** (bash) — use this if you're working from this
+repo's Codespace rather than a local Windows machine:
+```bash
+cd /workspaces/AI-Trading-Bot-Suite/CryptoBot/deploy/oracle
+./deploy.sh <YOUR_SERVER_IP> --first-deploy --sync-state
+```
+Before running this, set up SSH access from the Codespace to the server: generate a key
+with `ssh-keygen -t ed25519 -f ~/.ssh/oracle_bot_key -N ""`, paste the `.pub` key into
+the Oracle instance's SSH keys (or add it to the server's `~/.ssh/authorized_keys` if the
+instance is already running), then re-run the script.
+
+Both scripts do the same thing:
+1. Push your latest code to GitHub (commits any uncommitted local changes first)
 2. Pull it on the server
 3. Copy .env files (API keys)
 4. Copy state files (positions, balances)
 5. Run setup_server.sh (install Python, create venvs, install deps, enable services)
 6. Start all bots
+
+> **Repo layout**: this is a single monorepo (`AI-Trading-Bot-Suite`) containing all 4
+> bots as subfolders. The server clones it once to `~/AI-Trading-Bot-Suite` — there are
+> no more separate per-bot repos.
 
 ---
 
@@ -156,10 +170,18 @@ htop
 .\deploy.ps1 -ServerIP <YOUR_SERVER_IP>
 ```
 
-### Pull code updates on server:
+### Pull code updates on server (without redeploying from your dev machine):
 ```bash
 ~/deploy/update_bots.sh
 ```
+
+### Why this matters if you're running in a GitHub Codespace:
+Codespaces have a default 30-minute idle timeout and are stopped automatically when you
+disconnect — they are **not** a persistent host. Anything run only via `nohup`/background
+processes inside a Codespace stops when the Codespace stops. This Oracle Cloud VM (or any
+always-on server you deploy to via the scripts above) is what keeps the bots running when
+your laptop is off or asleep — the Codespace should only be used for development, not as
+the production host.
 
 ### Stop/start individual bot:
 ```bash

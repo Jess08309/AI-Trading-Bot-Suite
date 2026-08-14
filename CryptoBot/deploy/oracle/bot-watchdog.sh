@@ -16,7 +16,7 @@ check_and_restart() {
     enabled=$(systemctl is-enabled "$svc" 2>/dev/null || echo "disabled")
     
     if [ "$enabled" != "enabled" ]; then
-        return 0  # Skip disabled services (e.g. AlpacaBot at 0%)
+        return 0  # Skip disabled services
     fi
 
     if ! systemctl is-active --quiet "$svc"; then

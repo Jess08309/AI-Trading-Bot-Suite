@@ -2,19 +2,19 @@
 Description=CallBuyer - Momentum Call Buying (15% allocation)
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=10
 
 [Service]
 Type=simple
 User=botuser
 Group=botuser
-WorkingDirectory=/home/botuser/CallBuyer
-ExecStart=/home/botuser/CallBuyer/.venv/bin/python -u main.py
+WorkingDirectory=/home/botuser/AI-Trading-Bot-Suite/CallBuyer
+ExecStart=/home/botuser/AI-Trading-Bot-Suite/CallBuyer/.venv/bin/python -u main.py
 
 # Restart policy
 Restart=always
 RestartSec=30
-StartLimitIntervalSec=600
-StartLimitBurst=10
 
 # Logging
 StandardOutput=journal

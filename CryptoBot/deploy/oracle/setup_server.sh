@@ -17,16 +17,10 @@ echo "========================================="
 echo "[1/7] Installing system packages..."
 apt-get update -qq
 apt-get install -y -qq \
-    python3.11 python3.11-venv python3.11-dev \
-    python3-pip git curl htop tmux jq ufw \
-    > /dev/null 2>&1
+    python3 python3-venv python3-dev python3-full \
+    python3-pip git curl htop tmux jq ufw
 
-# Use python3.11 as default if available
-if command -v python3.11 &>/dev/null; then
-    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 2>/dev/null || true
-fi
-
-PYTHON=$(command -v python3.11 || command -v python3)
+PYTHON=$(command -v python3)
 echo "  Using Python: $PYTHON ($($PYTHON --version))"
 
 # --- Create bot user ---
@@ -46,36 +40,30 @@ ufw allow ssh > /dev/null
 ufw --force enable > /dev/null
 echo "  UFW: deny incoming, allow outgoing, allow SSH"
 
-# --- Clone repositories ---
-echo "[4/7] Cloning bot repositories..."
+# --- Clone repository ---
+echo "[4/7] Cloning bot repository (monorepo)..."
 sudo -u "$BOT_USER" bash <<'CLONE_SCRIPT'
 cd ~
+REPO_URL="https://github.com/Jess08309/AI-Trading-Bot-Suite.git"
+REPO_DIR="AI-Trading-Bot-Suite"
 
-declare -A REPOS
-REPOS[CryptoBot]="https://github.com/Jess08309/CryptoBot-Updated-20260321.git"
-REPOS[PutSeller]="https://github.com/Jess08309/PutSeller.git"
-REPOS[CallBuyer]="https://github.com/Jess08309/CallBuyer.git"
-REPOS[AlpacaBot]="https://github.com/Jess08309/AlpacaBot.git"
-
-for BOT in "${!REPOS[@]}"; do
-    if [ -d "$BOT" ]; then
-        echo "  $BOT: already cloned, pulling latest..."
-        cd "$BOT" && git pull --ff-only && cd ~
-    else
-        echo "  $BOT: cloning..."
-        git clone "${REPOS[$BOT]}" "$BOT"
-    fi
-done
+if [ -d "$REPO_DIR" ]; then
+    echo "  $REPO_DIR: already cloned, pulling latest..."
+    cd "$REPO_DIR" && git pull --ff-only && cd ~
+else
+    echo "  $REPO_DIR: cloning..."
+    git clone "$REPO_URL" "$REPO_DIR"
+fi
 CLONE_SCRIPT
 
 # --- Create virtual environments & install deps ---
 echo "[5/7] Setting up Python virtual environments..."
 PYTHON_PATH=$PYTHON
 sudo -u "$BOT_USER" bash <<VENV_SCRIPT
-cd ~
+cd ~/AI-Trading-Bot-Suite
 for BOT in CryptoBot PutSeller CallBuyer AlpacaBot; do
     echo "  \$BOT: creating venv..."
-    cd ~/\$BOT
+    cd ~/AI-Trading-Bot-Suite/\$BOT
     $PYTHON_PATH -m venv .venv
     source .venv/bin/activate
     pip install --upgrade pip -q
@@ -83,35 +71,36 @@ for BOT in CryptoBot PutSeller CallBuyer AlpacaBot; do
         pip install -r requirements.txt -q
     fi
     deactivate
-    cd ~
+    cd ~/AI-Trading-Bot-Suite
 done
 VENV_SCRIPT
 
 # --- Create required directories ---
 echo "[6/7] Creating data directories..."
 sudo -u "$BOT_USER" bash <<'DIR_SCRIPT'
-cd ~
+cd ~/AI-Trading-Bot-Suite
 
-# CryptoBot directories
-mkdir -p ~/CryptoBot/logs
-mkdir -p ~/CryptoBot/data/state
-mkdir -p ~/CryptoBot/data/models
-mkdir -p ~/CryptoBot/reports
+# CryptoBot directories (runtime lives under cryptotrades/)
+mkdir -p ~/AI-Trading-Bot-Suite/CryptoBot/cryptotrades/logs
+mkdir -p ~/AI-Trading-Bot-Suite/CryptoBot/cryptotrades/data/state
+mkdir -p ~/AI-Trading-Bot-Suite/CryptoBot/cryptotrades/data/models
+mkdir -p ~/AI-Trading-Bot-Suite/CryptoBot/data/state
+mkdir -p ~/AI-Trading-Bot-Suite/CryptoBot/reports
 
 # PutSeller directories
-mkdir -p ~/PutSeller/logs
-mkdir -p ~/PutSeller/data/state
-mkdir -p ~/PutSeller/reports
+mkdir -p ~/AI-Trading-Bot-Suite/PutSeller/logs
+mkdir -p ~/AI-Trading-Bot-Suite/PutSeller/data/state
+mkdir -p ~/AI-Trading-Bot-Suite/PutSeller/reports
 
 # CallBuyer directories
-mkdir -p ~/CallBuyer/logs
-mkdir -p ~/CallBuyer/data/state
-mkdir -p ~/CallBuyer/reports
+mkdir -p ~/AI-Trading-Bot-Suite/CallBuyer/logs
+mkdir -p ~/AI-Trading-Bot-Suite/CallBuyer/data/state
+mkdir -p ~/AI-Trading-Bot-Suite/CallBuyer/reports
 
 # AlpacaBot directories
-mkdir -p ~/AlpacaBot/logs
-mkdir -p ~/AlpacaBot/data/state
-mkdir -p ~/AlpacaBot/reports
+mkdir -p ~/AI-Trading-Bot-Suite/AlpacaBot/logs
+mkdir -p ~/AI-Trading-Bot-Suite/AlpacaBot/data/state
+mkdir -p ~/AI-Trading-Bot-Suite/AlpacaBot/reports
 DIR_SCRIPT
 
 # --- Install systemd services ---
@@ -141,18 +130,16 @@ echo "  Setup complete!"
 echo "========================================="
 echo ""
 echo "NEXT STEPS:"
-echo "  1. Copy .env files to the server:"
-echo "     scp C:\\Bot\\.env         botuser@<IP>:~/CryptoBot/.env"
-echo "     scp C:\\Bot\\cryptotrades\\.env botuser@<IP>:~/CryptoBot/cryptotrades/.env"
-echo "     scp C:\\PutSeller\\.env   botuser@<IP>:~/PutSeller/.env"
-echo "     scp C:\\CallBuyer\\.env   botuser@<IP>:~/CallBuyer/.env"
-echo "     scp C:\\AlpacaBot\\.env   botuser@<IP>:~/AlpacaBot/.env"
+echo "  1. Copy .env files to the server (run ./deploy.sh from the repo, or manually):"
+echo "     scp AlpacaBot/.env                   botuser@<IP>:~/AI-Trading-Bot-Suite/AlpacaBot/.env"
+echo "     scp PutSeller/.env                   botuser@<IP>:~/AI-Trading-Bot-Suite/PutSeller/.env"
+echo "     scp CallBuyer/.env                   botuser@<IP>:~/AI-Trading-Bot-Suite/CallBuyer/.env"
+echo "     scp CryptoBot/cryptotrades/.env      botuser@<IP>:~/AI-Trading-Bot-Suite/CryptoBot/cryptotrades/.env"
 echo ""
-echo "  2. Copy state files (paper balances, positions, etc.):"
-echo "     Use deploy.ps1 from your Windows machine"
+echo "  2. Copy state files (paper balances, positions, etc.) — use deploy.sh -SyncState"
 echo ""
 echo "  3. Start the bots:"
-echo "     sudo systemctl start cryptobot putseller callbuyer"
+echo "     sudo systemctl start cryptobot putseller callbuyer alpacabot"
 echo "     sudo systemctl start bot-watchdog.timer"
 echo ""
 echo "  4. Check status:"

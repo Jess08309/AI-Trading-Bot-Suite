@@ -6,24 +6,24 @@
 set -euo pipefail
 
 echo "=== Pulling latest code ==="
+cd "/home/botuser/AI-Trading-Bot-Suite"
+git pull --ff-only
+CHANGED_FILES=$(git diff HEAD@{1} --name-only 2>/dev/null || true)
+
 for BOT in CryptoBot PutSeller CallBuyer AlpacaBot; do
-    echo "  $BOT..."
-    cd "/home/botuser/$BOT"
-    git pull --ff-only
-    
-    # Reinstall deps if requirements.txt changed
-    if git diff HEAD~1 --name-only 2>/dev/null | grep -q requirements.txt; then
-        echo "    requirements.txt changed — reinstalling..."
+    if echo "$CHANGED_FILES" | grep -q "^${BOT}/requirements.txt$"; then
+        echo "  ${BOT}/requirements.txt changed — reinstalling..."
+        cd "/home/botuser/AI-Trading-Bot-Suite/${BOT}"
         source .venv/bin/activate
         pip install -r requirements.txt -q
         deactivate
+        cd "/home/botuser/AI-Trading-Bot-Suite"
     fi
-    cd ~
 done
 
 echo ""
 echo "=== Restarting services ==="
-sudo systemctl restart cryptobot putseller callbuyer
+sudo systemctl restart cryptobot putseller callbuyer alpacabot
 
 echo ""
 echo "=== Status ==="

@@ -2,13 +2,15 @@
 Description=CryptoBot - Spot + Futures Crypto Trading (24/7)
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=10
 
 [Service]
 Type=simple
 User=botuser
 Group=botuser
-WorkingDirectory=/home/botuser/CryptoBot
-ExecStart=/home/botuser/CryptoBot/.venv/bin/python -u cryptotrades/main.py
+WorkingDirectory=/home/botuser/AI-Trading-Bot-Suite/CryptoBot
+ExecStart=/home/botuser/AI-Trading-Bot-Suite/CryptoBot/.venv/bin/python -u cryptotrades/main.py
 
 # Aggressive profile environment variables
 Environment=ENABLE_FUTURES=true
@@ -20,12 +22,17 @@ Environment=RL_SHADOW_MODE=false
 Environment=RL_LIVE_SIZE_CONTROL=false
 Environment=RL_LIVE_SIZE_MIN_MULT=0.5
 Environment=RL_LIVE_SIZE_MAX_MULT=2.0
+Environment=ML_CHALLENGER_SHADOW_MODE=true
+Environment=ML_CHALLENGER_MIN_CONFIDENCE=0.60
 Environment=USE_LOCKED_PROFILE=true
-Environment=LOCKED_PROFILE_PATH=/home/botuser/CryptoBot/data/state/locked_profile.json
+Environment=LOCKED_PROFILE_PATH=/home/botuser/AI-Trading-Bot-Suite/CryptoBot/data/state/locked_profile.json
 Environment=LOCKED_PROFILE_ALLOW_ENV_OVERRIDES=true
 Environment=AGGRESSIVE_FUTURES_BURST=true
 Environment=FORCE_MODEL_RETRAIN_ON_START=true
-Environment=TRADE_CYCLE_INTERVAL_OVERRIDE=1
+# NOTE: base RISK_CHECK_INTERVAL default is now 20s (was 60s) to reduce stop-loss
+# slippage. TRADE_CYCLE_INTERVAL_OVERRIDE=3 * 20s = 60s preserves the original
+# intended trade-decision cadence for this aggressive profile (was 1 * 60s = 60s).
+Environment=TRADE_CYCLE_INTERVAL_OVERRIDE=3
 Environment=MODEL_RETRAIN_HOURS_OVERRIDE=2
 Environment=MIN_ML_CONFIDENCE_OVERRIDE=0.58
 Environment=MIN_ENSEMBLE_SCORE_OVERRIDE=0.58
@@ -53,8 +60,6 @@ Environment=SYMBOL_PAUSE_CONSECUTIVE_LOSSES_OVERRIDE=4
 # Restart policy
 Restart=always
 RestartSec=30
-StartLimitIntervalSec=600
-StartLimitBurst=10
 
 # Logging
 StandardOutput=journal
