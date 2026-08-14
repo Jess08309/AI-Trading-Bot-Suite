@@ -16,6 +16,15 @@ log = logging.getLogger("callbuyer.risk")
 class RiskManager:
     """Manages capital allocation and risk for call buying."""
 
+    # FINRA retired the PDT trade-counting/$25k rule, replacing it with a
+    # risk-based intraday margin framework (SEC-approved 2026-04-14, effective
+    # 2026-06-04; brokers have until 2027-10-20 to fully migrate). Off by
+    # default; flip PDT_GUARD_ENABLED=true if a broker still enforces the old
+    # rule during its transition window.
+    PDT_GUARD_ENABLED = os.getenv("PDT_GUARD_ENABLED", "false").strip().lower() in ("true", "1", "yes")
+    PDT_EQUITY_THRESHOLD = 25_000.0
+    PDT_DAY_TRADE_LIMIT = 3
+
     def __init__(self, config: CallBuyerConfig):
         self.config = config
         self.state = {
@@ -73,7 +82,13 @@ class RiskManager:
 
     def can_open_position(self, current_positions: int,
                           underlying: str,
-                          positions: Dict[str, Any]) -> tuple:
+                          positions: Dict[str, Any],
+                          account: Dict[str, Any] = None) -> tuple:
+        if account is not None:
+            can_pdt, reason_pdt = self.check_pdt_guard(account)
+            if not can_pdt:
+                return False, reason_pdt
+
         if current_positions >= self.config.MAX_POSITIONS:
             return False, f"max positions reached ({self.config.MAX_POSITIONS})"
 
@@ -125,8 +140,12 @@ class RiskManager:
         # Call buying: keep positions small (1-5 contracts typically)
         return min(max(contracts, 0), 5)
 
-    def can_trade(self) -> bool:
+    def can_trade(self, account: Dict[str, Any] = None) -> bool:
         """Quick check: can we open any new trades right now?"""
+        if account is not None:
+            can_pdt, _ = self.check_pdt_guard(account)
+            if not can_pdt:
+                return False
         daily_limit = self.state["current_balance"] * -0.05
         if self.state["daily_pnl"] <= daily_limit:
             return False
@@ -135,6 +154,27 @@ class RiskManager:
         if self.state.get("daily_trades", 0) >= 8:
             return False
         return True
+
+    def check_pdt_guard(self, account: Dict[str, Any]) -> tuple:
+        """Pattern Day Trader guard — see AlpacaBot's RiskManager for full rationale.
+        CallBuyer holds calls short-term and can round-trip same-day, so this
+        is the highest-risk bot for PDT violations without this guard.
+        """
+        equity = account.get("equity", 0) or 0
+        if equity >= self.PDT_EQUITY_THRESHOLD:
+            return True, "OK"
+
+        if account.get("pattern_day_trader"):
+            return False, "PDT: account flagged pattern day trader — new entries blocked"
+
+        day_trade_count = account.get("day_trade_count", 0) or 0
+        if day_trade_count >= self.PDT_DAY_TRADE_LIMIT:
+            return False, (
+                f"PDT: {day_trade_count} day trades used (limit {self.PDT_DAY_TRADE_LIMIT} "
+                f"for equity < ${self.PDT_EQUITY_THRESHOLD:,.0f}) — blocking new entries"
+            )
+
+        return True, "OK"
 
     @property
     def daily_trades(self) -> int:

@@ -99,6 +99,8 @@ class CallBuyerAPI:
             "equity": float(acct.equity),
             "cash": float(acct.cash),
             "buying_power": float(acct.buying_power),
+            "day_trade_count": int(acct.daytrade_count or 0),
+            "pattern_day_trader": acct.pattern_day_trader,
         }
 
     # ── Market Data ──────────────────────────────────────

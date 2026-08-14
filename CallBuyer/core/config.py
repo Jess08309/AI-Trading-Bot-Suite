@@ -96,9 +96,9 @@ class CallBuyerConfig:
     # ── Timing ───────────────────────────────────────────
     SCAN_INTERVAL_SEC: int = 600             # 10 min between opportunity scans
     CHECK_INTERVAL_SEC: int = 180            # 3 min between position checks
-    MARKET_OPEN_HOUR: int = 7               # 7:30 AM MT = 9:30 AM ET
+    MARKET_OPEN_HOUR: int = 9                # 9:30 AM ET (compared against America/New_York clock)
     MARKET_OPEN_MIN: int = 30
-    MARKET_CLOSE_HOUR: int = 14              # 2:00 PM MT = 4:00 PM ET
+    MARKET_CLOSE_HOUR: int = 16               # 4:00 PM ET
     MARKET_CLOSE_MIN: int = 0
     NO_OPEN_FIRST_MIN: int = 0               # scan immediately at open
     NO_OPEN_LAST_MIN: int = 30               # skip last 30 min

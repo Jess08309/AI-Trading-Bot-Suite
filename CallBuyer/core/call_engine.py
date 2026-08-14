@@ -444,7 +444,13 @@ class CallBuyerEngine:
             log.info(f"At max positions ({len(self.positions)}), skipping scan")
             return
 
-        if not self.risk.can_trade():
+        try:
+            acct = self.api.get_account()
+        except Exception as e:
+            log.debug(f"PDT/account check failed (proceeding without guard): {e}")
+            acct = None
+
+        if not self.risk.can_trade(account=acct):
             log.info("Risk manager blocking trades")
             return
 
@@ -930,9 +936,21 @@ class CallBuyerEngine:
             if pnl_pct >= self.config.TAKE_PROFIT_PCT:
                 return f"TAKE_PROFIT ({pnl_pct:+.1%})"
 
-            # 2. Stop Loss
+            # 2. Stop Loss — require 2 consecutive polls to agree before
+            # closing. Illiquid option NBBO quotes can print a single noisy/
+            # stale bid (e.g. a transient $0 or near-zero print) that looks
+            # like a huge drop but isn't real; acting on one bad tick was
+            # causing real closes at prices nowhere near the triggering
+            # "reason" pct (seen live: trigger said -90% but the actual fill
+            # was only -3.5% off entry). One extra ~30-60s poll cycle of
+            # confirmation is cheap insurance against a single bad print.
             if pnl_pct <= self.config.STOP_LOSS_PCT:
-                return f"STOP_LOSS ({pnl_pct:+.1%})"
+                pos["stop_loss_strikes"] = pos.get("stop_loss_strikes", 0) + 1
+                if pos["stop_loss_strikes"] >= 2:
+                    return f"STOP_LOSS ({pnl_pct:+.1%})"
+                log.debug(f"{pos_id}: stop-loss condition seen ({pnl_pct:+.1%}) — awaiting confirmation")
+            else:
+                pos["stop_loss_strikes"] = 0
 
             # 3. DTE Exit — avoid theta crush
             try:

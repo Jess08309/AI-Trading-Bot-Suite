@@ -28,6 +28,7 @@ logs/
 # Data (state + models)
 data/state/
 data/trades.csv
+data/historical/
 models/*.joblib
 
 # Temp
