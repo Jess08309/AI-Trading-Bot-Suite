@@ -46,6 +46,13 @@ of CryptoBot for a clean, independent backtest):
 
 Run this in QuantConnect's cloud IDE (Algorithm Lab) — compiling/backtesting
 LEAN locally is not available in this workspace.
+
+NOTE: this file is the "as-designed" QC-port baseline and is currently
+dormant (QC now requires credit-card verification for free-tier backtests,
+which the user declined). A parameter-tuned + regime-filtered variant of
+these same rules was grid-searched locally against real Alpaca data instead
+-- see CryptoBot/tools/local_backtest_qc_port.py (and optimize_backtest*.py
+for the sweep methodology) for the current best-known config and results.
 """
 from AlgorithmImports import *
 import numpy as np

@@ -5,11 +5,21 @@ credentials the live spot bot already uses) instead of QuantConnect's cloud
 (which now gates backtests behind a credit-card verification step the user
 does not want to complete).
 
-Mirrors CryptoBot/quantconnect/main.py's CryptoBotMomentumAlgorithm rules
-exactly: calculate_trend (20-bar slope), RSI(14)/MAX_RSI_LONG=68, the 0-10
-mechanical rule score (MIN_RULE_SCORE=5.0), the exit ladder (stop-loss,
-take-profit, trailing stop, max-hold), and the circuit breaker. SPOT-LONG-ONLY,
-same as the QC port (no short side without Kraken futures data).
+Base rules mirror CryptoBot/quantconnect/main.py's CryptoBotMomentumAlgorithm:
+calculate_trend (20-bar slope), RSI(14)/MAX_RSI_LONG=68, the 0-10 mechanical
+rule score, the exit ladder (stop-loss, take-profit, trailing stop, max-hold),
+and the circuit breaker. SPOT-LONG-ONLY, same as the QC port (no short side
+without Kraken futures data).
+
+Several thresholds (MIN_RULE_SCORE, MIN_TREND_SLOPE, TAKE_PROFIT_PCT,
+STOP_LOSS_PCT) and an added longer-horizon regime filter (REGIME_SMA_PERIOD)
+were re-tuned via grid search (see optimize_backtest*.py) against this same
+2021-2026 dataset, improving net profit from -88.5% (QC-port-as-written) to
+-15.5% -- still a net loser. This is a real, load-bearing finding, not a bug:
+a rules-only mechanical strategy without CryptoBot's live ML confidence gate
+does not have a positive edge on this data, no matter how it's tuned. Treat
+the "improved" config as a local optimum on backtested history, not a proven
+edge -- it hasn't been validated out-of-sample.
 
 ADA/USD is excluded: Alpaca's free crypto data only goes back to ~mid-2026 for
 that symbol (no multi-year history available), unlike BTC/ETH/LTC/BCH which
@@ -43,17 +53,21 @@ SYMBOLS = ["BTC/USD", "ETH/USD", "LTC/USD", "BCH/USD"]  # ADA excluded, see docs
 START = "2021-06-01"
 END = "2026-08-01"
 
-# --- Rule constants, ported verbatim from CryptoBot/quantconnect/main.py ---
+# --- Rule constants ---
+# Base values ported verbatim from CryptoBot/quantconnect/main.py; MIN_RULE_SCORE,
+# MIN_TREND_SLOPE, TAKE_PROFIT_PCT, STOP_LOSS_PCT, and REGIME_SMA_PERIOD were
+# re-tuned via grid search (optimize_backtest*.py) against this same 2021-2026
+# dataset -- baseline (QC-port-as-written) values are noted alongside each.
 TREND_LOOKBACK = 20
-MIN_TREND_SLOPE = 0.0005
+MIN_TREND_SLOPE = 0.0015  # was 0.0005; stronger trend required to enter
 MAX_RSI_LONG = 68.0
-MIN_RULE_SCORE = 5.0
+MIN_RULE_SCORE = 8.0  # was 5.0; only the highest-quality setups qualify
 
 MAX_POSITION_PCT = 0.12
 MAX_POSITIONS = 4
 
-STOP_LOSS_PCT = -1.5
-TAKE_PROFIT_PCT = 1.5
+STOP_LOSS_PCT = -1.0  # was -1.5; tighter stop for a better reward:risk ratio
+TAKE_PROFIT_PCT = 2.5  # was 1.5
 TRAILING_STOP_PCT = 0.8
 TRAILING_ACTIVATE_PCT = 0.6
 
@@ -71,8 +85,11 @@ INITIAL_CASH = 10000.0
 
 # Optional longer-horizon regime filter (not in the original QC port): require
 # close > SMA(REGIME_SMA_PERIOD) to avoid buying momentum blips inside a
-# broader downtrend. 0 disables it (matches the original QC port exactly).
-REGIME_SMA_PERIOD = 0
+# broader downtrend. Grid search (optimize_backtest_v3.py/_v4.py) found 4000
+# hours (~167 days) as the local optimum -- net profit improved monotonically
+# up to 4000 then got worse again at 6000-10000, so this isn't just "trade
+# less = better", it's a genuine local optimum. 0 disables it entirely.
+REGIME_SMA_PERIOD = 4000
 
 
 def fetch_bars(symbol: str, start: str, end: str) -> list:
