@@ -147,6 +147,9 @@ class ScalpTradingEngine:
         self._regime_flip_severity: float = 0.0
         self._regime_flip_mult: float = 1.0         # position size multiplier during flip
         self._regime_flip_block: bool = False        # block entries during severe flip
+        self._whipsaw_block_start_time: float = 0.0  # start of current instability streak
+        self._max_whipsaw_block_min: float = 120     # hard cap so a persistently choppy
+                                                      # market can't renew the block forever
 
         # Put vs Call win-rate tracking — auto-disable puts when WR < 30%
         self._put_wins: int = 0
@@ -550,11 +553,19 @@ class ScalpTradingEngine:
 
             whipsaw = flips >= 3
 
+            # Mark the start of a continuous instability streak the first time
+            # we enter it — do NOT reset this on every subsequent reflip, or a
+            # choppy market can renew the block forever and trade zero times.
+            if self._whipsaw_block_start_time == 0.0:
+                self._whipsaw_block_start_time = now
+            block_elapsed_min = (now - self._whipsaw_block_start_time) / 60
+            hard_cap_hit = block_elapsed_min >= self._max_whipsaw_block_min
+
             # Set multiplier and blocking
-            if whipsaw:
+            if whipsaw and not hard_cap_hit:
                 self._regime_flip_mult = 0.30
                 self._regime_flip_block = True
-            elif severity >= 0.8:
+            elif severity >= 0.8 and not hard_cap_hit:
                 self._regime_flip_mult = 0.40
                 self._regime_flip_block = True
             else:
@@ -566,6 +577,7 @@ class ScalpTradingEngine:
                 f"severity={severity:.2f}, mult={self._regime_flip_mult:.2f}, "
                 f"block={self._regime_flip_block}, "
                 f"flips_4h={flips}{' WHIPSAW' if whipsaw else ''}"
+                f"{' HARD-CAP-OVERRIDE' if hard_cap_hit else ''}"
             )
         elif self._last_flip_time > 0:
             # Check if cooldown has expired
@@ -579,14 +591,20 @@ class ScalpTradingEngine:
                 self._regime_flip_mult = 1.0
                 self._regime_flip_block = False
                 self._regime_flip_severity = 0.0
+                self._whipsaw_block_start_time = 0.0
             else:
                 # Fade the multiplier toward 1.0 as cooldown expires
                 remaining_pct = 1.0 - (elapsed_min / self._regime_flip_cooldown_min)
                 base_mult = max(0.30, 1.0 - self._regime_flip_severity * 0.5)
                 self._regime_flip_mult = base_mult + (1.0 - base_mult) * (1.0 - remaining_pct)
-                # Unblock entries after first half of cooldown
+                # Unblock entries after first half of cooldown, or once the
+                # instability streak has run past the hard cap regardless
                 if remaining_pct < 0.5:
                     self._regime_flip_block = False
+                if self._whipsaw_block_start_time > 0.0:
+                    streak_min = (now - self._whipsaw_block_start_time) / 60
+                    if streak_min >= self._max_whipsaw_block_min:
+                        self._regime_flip_block = False
 
     def _spy_trend_is_up(self) -> bool:
         """Return True if SPY's 20-bar trend is UP.

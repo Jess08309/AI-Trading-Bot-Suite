@@ -97,3 +97,6 @@ desktop.ini
 
 # Test state
 test_state/
+
+# Local backtest cache (large, re-fetchable from Alpaca)
+data/backtest_cache/

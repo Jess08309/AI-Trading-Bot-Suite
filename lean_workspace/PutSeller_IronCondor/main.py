@@ -39,16 +39,11 @@ class PutSellerIronCondorAlgorithm(QCAlgorithm):
     MIN_DTE_EXIT = 21
 
     SHORT_DELTA_MIN = 0.10
-    SHORT_DELTA_MAX = 0.18            # was 0.15 — 0.15 was TOO tight: combined with MIN_CREDIT_PCT=0.15
-                                       # it found almost no qualifying spreads (0 trades, 80 orders all
-                                       # stale-canceled). Split the difference between 0.20 (baseline)
-                                       # and 0.15 (too tight) to still favor win rate without starving entries
+    SHORT_DELTA_MAX = 0.20            # was 0.25 — favor higher OTM probability / win rate
 
     MIN_CREDIT_PCT = 0.15
-    TAKE_PROFIT_PCT = 0.60           # was 0.50 — capture more premium decay per win (reward:risk fix)
-    STOP_LOSS_MULT = 1.4             # was 1.5 — delta=0.18 got Avg Win/Loss to 0.18%/-0.19% (nearly
-                                      # breakeven, WR 50%, Expectancy -0.012); trim max loss a bit further
-                                      # to close the small remaining gap without touching win rate
+    TAKE_PROFIT_PCT = 0.50
+    STOP_LOSS_MULT = 2.0
     EMERGENCY_BUFFER_PCT = 0.02      # was 0.05 \u2014 order analysis showed EMERGENCY exits closing within 3 days of
                                      # entry had only a 36.4% win rate (worst of any hold-time bucket) since 5% was
                                      # triggering on routine volatility before positions could develop; 2% requires
@@ -72,16 +67,11 @@ class PutSellerIronCondorAlgorithm(QCAlgorithm):
     SPY_VOL_HALT_ANNUALIZED = 0.28    # pause NEW entries when SPY realized vol spikes above this
     TREND_SMA = 50                    # underlying trend lookback for directional alignment
 
-    # A decaying-fraction retry (relaxing toward a worse fill on stale orders) was tried and
-    # backtested WORSE than a single fixed requirement (-27.6% vs -13.3% net profit) — accepting
-    # more fills at thinner credit erased the edge faster than it added trades. Reverted to a
-    # single fixed requirement with no relaxation: give up (cancel, don't retry) if unfilled.
-    # At delta=0.18/TP=0.60/SL=1.4, entry fill rate was only 25.8% (830/1118 stale-canceled) and
-    # gross P&L before fees was actually +$186 (fees of $288 flipped it to -$102 net). Tested a
-    # small FIXED bump to 0.80 (vs the decaying walk's overreach) — STILL WORSE: -1.825% net
-    # profit, fees rose to $348, win rate dropped 51%->46%. 0.85 is a local optimum; reverted.
-    LIMIT_CREDIT_FRACTION = 0.85   # entry fill must be within this fraction of the theoretical mid credit
-    LIMIT_ORDER_MAX_WAIT_MIN = 30  # cancel and give up on an unfilled entry limit order after this long
+    LIMIT_CREDIT_FRACTION_START = 0.85  # first entry attempt requires a fill this close to the mid credit
+    LIMIT_CREDIT_FRACTION_STEP = 0.10   # each stale retry relaxes the requirement by this much
+    LIMIT_CREDIT_FRACTION_FLOOR = 0.50   # give up entirely below this — still meaningfully better than
+                                         # a market order (which was found to lose money on BOTH legs)
+    LIMIT_ORDER_MAX_WAIT_MIN = 30  # cancel/relax an unfilled entry limit order after this long
 
     def initialize(self) -> None:
         self.set_start_date(2024, 1, 1)
@@ -183,16 +173,26 @@ class PutSellerIronCondorAlgorithm(QCAlgorithm):
                     "right": right,
                     "entry_time": self.time,
                 })
-                self.debug(f"{ticker}: {right} spread FILLED credit={real_credit:.2f} (target>={pend['target_credit']:.2f})")
+                self.debug(f"{ticker}: {right} spread FILLED credit={real_credit:.2f} (target>={pend['target_credit']:.2f}, fraction={pend['fraction']:.2f})")
                 del self.pending_entries[key]
             elif any(s in (OrderStatus.CANCELED, OrderStatus.INVALID) for s in statuses):
                 del self.pending_entries[key]
             elif (self.time - pend["placed_time"]).total_seconds() / 60 >= self.LIMIT_ORDER_MAX_WAIT_MIN:
                 for t in tickets:
                     if t.status not in (OrderStatus.FILLED, OrderStatus.CANCELED):
-                        t.cancel("limit order stale, giving up")
-                del self.pending_entries[key]
-                self.debug(f"{ticker}: {right} spread limit order stale, canceled (no fill within {self.LIMIT_ORDER_MAX_WAIT_MIN}min)")
+                        t.cancel("limit order stale, relaxing price")
+                next_fraction = pend["fraction"] - self.LIMIT_CREDIT_FRACTION_STEP
+                if next_fraction < self.LIMIT_CREDIT_FRACTION_FLOOR:
+                    del self.pending_entries[key]
+                    continue
+                new_target_credit = pend["mid_credit"] * next_fraction
+                new_legs = [Leg.create(pend["short_symbol"], -1), Leg.create(pend["long_symbol"], 1)]
+                new_tickets = self.combo_limit_order(new_legs, 1, -new_target_credit)
+                pend["tickets"] = new_tickets
+                pend["target_credit"] = new_target_credit
+                pend["fraction"] = next_fraction
+                pend["placed_time"] = self.time
+                self.debug(f"{ticker}: {right} spread limit relaxed to fraction={next_fraction:.2f} target_credit>={new_target_credit:.2f}")
 
     # ── Exit management ──────────────────────────────────────────
     def _check_exits(self, ticker: str, chain) -> None:
@@ -201,10 +201,7 @@ class PutSellerIronCondorAlgorithm(QCAlgorithm):
         for pos in self.spreads[ticker]:
             reason = self._check_exit(pos, chain, underlying_price)
             if reason:
-                # tag with just the reason keyword (e.g. "EMERGENCY_PUT") so order-level
-                # analysis via /backtests/orders/read can bucket win/loss by exit cause
-                # without needing debug logs (not retrievable via the QC API).
-                self.sell(pos["strategy"], 1, tag=reason.split(" ")[0].split("(")[0])
+                self.sell(pos["strategy"], 1)
                 self.last_exit[ticker][pos["right"]] = self.time
                 self.debug(f"{ticker}: closing spread ({pos['right']}) — {reason}")
             else:
@@ -376,9 +373,9 @@ class PutSellerIronCondorAlgorithm(QCAlgorithm):
         # A market order on both legs crosses the full bid/ask spread twice per
         # round trip (open + close), which order-level analysis showed was eating
         # the entire credit collected. A net combo limit order requires the fill to
-        # be within LIMIT_CREDIT_FRACTION of the theoretical mid credit — give up
-        # (cancel, no retry) if it doesn't fill within LIMIT_ORDER_MAX_WAIT_MIN.
-        target_credit = round(spread["credit"] * self.LIMIT_CREDIT_FRACTION, 2)
+        # be within LIMIT_CREDIT_FRACTION_START of the theoretical mid credit, then
+        # walks the price down toward LIMIT_CREDIT_FRACTION_FLOOR on stale retries.
+        target_credit = spread["credit"] * self.LIMIT_CREDIT_FRACTION_START
         legs = [Leg.create(short_c.symbol, -1), Leg.create(long_c.symbol, 1)]
         tickets = self.combo_limit_order(legs, 1, -target_credit)
 
@@ -391,6 +388,7 @@ class PutSellerIronCondorAlgorithm(QCAlgorithm):
             "expiry": spread["expiry"],
             "mid_credit": spread["credit"],
             "target_credit": target_credit,
+            "fraction": self.LIMIT_CREDIT_FRACTION_START,
             "placed_time": self.time,
         }
         self.debug(

@@ -232,7 +232,7 @@ class CallBuyerEngine:
                     pos_id = f"{pos_id}_{strike:.0f}"
 
                 high_water = max(current_price, avg_entry)
-                trailing_active = current_price >= avg_entry * 1.30
+                trailing_active = current_price >= avg_entry * (1 + self.config.TRAILING_ARM_GAIN)
 
                 self.positions[pos_id] = {
                     "symbol": underlying,
@@ -272,6 +272,26 @@ class CallBuyerEngine:
                     f"Position adoption complete: {adopted} orphaned "
                     f"positions now managed by exit rules"
                 )
+
+            # Reverse direction: drop LOCAL positions Alpaca no longer holds.
+            # A buy order can be accepted (order_id returned) but never actually
+            # fill/expire unfilled — if we never confirm the fill, positions.json
+            # can carry a "position" forever that Alpaca has no record of. Every
+            # close attempt then fails with a position_intent mismatch (sell
+            # inferred as sell_to_open since there's nothing to close), retries
+            # forever, and permanently occupies a MAX_POSITIONS slot.
+            live_contracts = {p["symbol"] for p in option_positions if int(p["qty"]) > 0}
+            stale = [pid for pid, pos in self.positions.items()
+                     if pos.get("order_id") != "ADOPTED" and pos["contract"] not in live_contracts]
+            for pid in stale:
+                pos = self.positions.pop(pid)
+                log.warning(
+                    f"STALE POSITION dropped: {pid} ({pos['contract']}) — "
+                    f"not found in Alpaca's real positions (likely an unfilled "
+                    f"entry order that was never confirmed)"
+                )
+            if stale:
+                self._save_positions()
 
         except Exception as e:
             log.error(f"Position adoption failed: {e}", exc_info=True)
@@ -965,9 +985,9 @@ class CallBuyerEngine:
             except Exception:
                 pass
 
-            # 4. Trailing Stop — after 30%+ gain, trail at 20%
+            # 4. Trailing Stop — arms after TRAILING_ARM_GAIN gain, trails at TRAILING_STOP_PCT
             high_water = pos.get("high_water", entry_price)
-            if high_water > entry_price * 1.30:  # 30%+ gain reached
+            if high_water > entry_price * (1 + self.config.TRAILING_ARM_GAIN):
                 pos["trailing_active"] = True
                 drawdown = (current_bid - high_water) / high_water if high_water > 0 else 0
                 if drawdown <= -self.config.TRAILING_STOP_PCT:

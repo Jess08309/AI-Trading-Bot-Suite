@@ -71,15 +71,28 @@ class CallBuyerConfig:
 
     # ── Meta-Learner ─────────────────────────────────────
     META_CONFIDENCE_THRESHOLD: float = 0.30  # min ensemble score to trade (was 0.45 — impossible during ML warmup where conf=score/10)
-    META_MIN_RULE_SCORE: float = 2           # min raw rule score (out of 10) (was 3 — typical stocks score 2-4)
+    # QC sandbox validated 3.5 -> 4.0 -> 4.5 -> 5.0 progressively, improving
+    # every metric at each step (Net Profit +6.658% -> +11.932% -> +12.783%
+    # -> +14.024%, Drawdown 13.3% -> 12.0% -> 10.7% -> 8.1%, Sharpe -0.392
+    # -> -0.235 -> -0.209 -> -0.177) — ported here from the prior live
+    # default of 2. Stopped increasing further at 5.0: Orders count started
+    # dropping faster (347 -> 313, -9.8%) vs earlier steps (-1%/-3.6%),
+    # signaling diminishing sample size / overfitting risk beyond this point.
+    META_MIN_RULE_SCORE: float = 5.0
     META_WINDOW: int = 40                    # rolling window for accuracy
     META_UPDATE_CYCLES: int = 20             # update thresholds every N cycles
 
     # ── Exit Rules ───────────────────────────────────────
     TAKE_PROFIT_PCT: float = 0.50            # close at 50% gain
-    STOP_LOSS_PCT: float = -0.25             # close at 25% loss (cut fast — 2:1 R:R)
+    # QC sandbox validated -0.25 -> -0.35 improved every metric (Net Profit
+    # -11.688% -> -6.559%, Drawdown 19.2% -> 12.5%, Win Rate 40% -> 50%).
+    STOP_LOSS_PCT: float = -0.35
     MIN_DTE_EXIT: int = 7                    # close at 7 DTE (avoid theta acceleration zone)
     TRAILING_STOP_PCT: float = 0.15          # 15% trailing stop (tighter to lock gains)
+    # QC sandbox validated widening the trailing-arm gain 0.30 -> 0.40 -> 0.50
+    # flipped the strategy profitable and kept improving Sharpe/Sortino with
+    # each step (see CallBuyer/quantconnect/main.py for full history).
+    TRAILING_ARM_GAIN: float = 0.50
 
     # ── Morning Window (mild time-of-day adjustment) ────
     # Momentum breakouts are strongest at market open.

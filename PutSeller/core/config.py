@@ -51,7 +51,8 @@ class PutSellerConfig:
 
     # Strike selection (PUTS)
     SHORT_DELTA_MIN: float = 0.10            # min delta magnitude (furthest OTM)
-    SHORT_DELTA_MAX: float = 0.25            # max delta magnitude (tighter = higher POP)
+    SHORT_DELTA_MAX: float = 0.18            # max delta magnitude (was 0.25 — QC backtest showed
+                                              # 0.25 was too loose; 0.18 improved net profit -13.3%->-0.4%)
     TARGET_SHORT_DELTA: float = 0.16         # ~16 delta (1 SD, 84% POP)
 
     # Spread width (based on stock price)
@@ -66,7 +67,7 @@ class PutSellerConfig:
     # ── Strategy: Bear Call Spreads (Credit) ─────────────
     CALL_SPREADS_ENABLED: bool = True        # enable call credit spread side
     CALL_SHORT_DELTA_MIN: float = 0.10       # min delta (furthest OTM)
-    CALL_SHORT_DELTA_MAX: float = 0.25       # max delta (tighter = higher POP)
+    CALL_SHORT_DELTA_MAX: float = 0.18       # max delta (was 0.25 — matches QC-validated put side)
     CALL_TARGET_DELTA: float = 0.16          # ~16 delta (1 SD, matches put side)
     CALL_MIN_CREDIT_PCT: float = 0.15        # min credit as % of width (matches put side)
     CALL_MIN_ROC_ANNUAL: float = 0.12        # min annualized ROC (matches put side)
@@ -78,8 +79,10 @@ class PutSellerConfig:
     HV_LOOKBACK_DAYS: int = 30               # historical vol lookback
 
     # ── Exit Rules ───────────────────────────────────────
-    TAKE_PROFIT_PCT: float = 0.50            # close at 50% of max profit
-    STOP_LOSS_MULT: float = 2.0              # close if loss >= 2x credit (1.0 caused cascading liquidation)
+    TAKE_PROFIT_PCT: float = 0.60            # close at 60% of max profit (was 0.50 — QC backtest:
+                                              # captures more premium decay per win, better reward:risk)
+    STOP_LOSS_MULT: float = 1.4              # close if loss >= 1.4x credit (was 2.0, then 1.5 — QC-validated
+                                              # with delta=0.18/TP=0.60: -0.102% net profit, near breakeven)
     MIN_DTE_EXIT: int = 21                   # close at 21 DTE (avoid gamma risk zone)
     EMERGENCY_BUFFER_PCT: float = 0.05       # close if underlying within 5% of short strike (was 2% — caused premature exits on normal intraday vol)
 

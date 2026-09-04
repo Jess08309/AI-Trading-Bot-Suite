@@ -142,7 +142,8 @@ class TradingConfig:
 
     # Entry Thresholds - QUALITY GATES
     # Confidence = max(up_prob, down_prob), range 0.50-1.0
-    MIN_ML_CONFIDENCE: float = 0.58        # Model must predict >=58% one direction (was 0.52 = noise)
+    MIN_ML_CONFIDENCE: float = 0.62        # was 0.58 — 296/829 live trades (36%) exited HOLD_DECAY
+                                            # (price never moved), signaling too many low-conviction entries
     MIN_ENSEMBLE_SCORE: float = 0.55  # Direction trigger — quality is gated by MIN_ML_CONFIDENCE (0.58)
     MAX_RSI_LONG: float = 68.0             # Don't buy if RSI > 68 (was 62 — too tight)
     MIN_RSI_SHORT: float = 32.0            # Don't short if RSI < 32 (was 38 — too tight)
@@ -156,8 +157,10 @@ class TradingConfig:
 
     # Direction Performance Tracker — auto-pause losing direction
     DIRECTION_PAUSE_LOOKBACK: int = 20     # Rolling window of recent trades per direction
-    DIRECTION_PAUSE_MIN_WR: float = 0.30   # Pause direction if WR drops below this
-    DIRECTION_PAUSE_HOURS: float = 1.0     # How long to pause a failing direction
+    DIRECTION_PAUSE_MIN_WR: float = 0.35   # was 0.30 — live SHORT win rate (30.7% over 560 trades,
+                                            # -$388.92) sat right at the old threshold and almost never
+                                            # tripped it; breakeven WR at current avg win/loss is ~40%
+    DIRECTION_PAUSE_HOURS: float = 4.0     # was 1.0 — 1h barely dented a failing streak at this cycle rate
     DIRECTION_PAUSE_MIN_TRADES: int = 10   # Need at least this many trades to judge
 
     # Sentiment

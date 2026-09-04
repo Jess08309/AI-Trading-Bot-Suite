@@ -1352,9 +1352,17 @@ class PutSellerEngine:
 
                 otm_pct = (price - short_strike) / price
                 dte_score = 1.0 - abs(dte - self.config.TARGET_DTE) / self.config.MAX_DTE
-                credit_score = credit_pct
+                # Favor the LOWEST-delta qualifying strike (furthest OTM) over raw
+                # credit_pct — maximizing credit systematically picks the riskier,
+                # closer-to-money edge of the band (QC backtest-confirmed driver of
+                # EMERGENCY exits). Falls back to credit_pct only if delta unavailable.
+                if short_delta is not None:
+                    delta_span = self.config.SHORT_DELTA_MAX - self.config.SHORT_DELTA_MIN
+                    safety_score = 1.0 - (short_delta - self.config.SHORT_DELTA_MIN) / delta_span if delta_span > 0 else 0.5
+                else:
+                    safety_score = credit_pct
                 oi_score = min(short_c["open_interest"] / 500, 1.0)
-                score = (credit_score * 0.4) + (dte_score * 0.3) + (oi_score * 0.3)
+                score = (safety_score * 0.4) + (dte_score * 0.3) + (oi_score * 0.3)
 
                 if score > best_score:
                     best_score = score
@@ -1658,9 +1666,15 @@ class PutSellerEngine:
 
                 otm_pct = (short_strike - price) / price  # positive = OTM above
                 dte_score = 1.0 - abs(dte - self.config.TARGET_DTE) / self.config.MAX_DTE
-                credit_score = credit_pct
+                # Favor the LOWEST-delta qualifying strike (furthest OTM) over raw
+                # credit_pct — see matching put-side comment above for rationale.
+                if short_delta is not None:
+                    delta_span = self.config.CALL_SHORT_DELTA_MAX - self.config.CALL_SHORT_DELTA_MIN
+                    safety_score = 1.0 - (short_delta - self.config.CALL_SHORT_DELTA_MIN) / delta_span if delta_span > 0 else 0.5
+                else:
+                    safety_score = credit_pct
                 oi_score = min(short_c["open_interest"] / 500, 1.0)
-                score = (credit_score * 0.4) + (dte_score * 0.3) + (oi_score * 0.3)
+                score = (safety_score * 0.4) + (dte_score * 0.3) + (oi_score * 0.3)
 
                 if score > best_score:
                     best_score = score

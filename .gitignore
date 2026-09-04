@@ -61,6 +61,11 @@ _FOUNDATION_V5_*/
 # ===== Test State =====
 test_state/
 
+# ===== Local backtest data caches (large, re-fetchable) =====
+lean_workspace/data/
+backtest_lab/cache/
+backtest_lab/cache_alpaca/
+
 # ===== OS =====
 Thumbs.db
 Desktop.ini

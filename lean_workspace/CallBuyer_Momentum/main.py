@@ -180,30 +180,7 @@ class CallBuyerMomentumAlgorithm(QCAlgorithm):
     MAX_PER_UNDERLYING = 2
 
     META_CONFIDENCE_THRESHOLD = 0.30
-    # VALIDATED via backtest: raising META_MIN_RULE_SCORE progressively from
-    # 3.5 has been the best-performing lever of the whole session.
-    # Step 1: 3.5 -> 4.0 (on top of TRAILING_ARM_GAIN=0.50 baseline: Net
-    # Profit +6.658%, Drawdown 13.3%, Expectancy +0.064, Sharpe -0.392,
-    # Sortino -0.472) improved every metric: Net Profit +6.658% -> +11.932%,
-    # Drawdown 13.3% -> 12.0%, Expectancy +0.064 -> +0.098, End Equity
-    # $53,328.75 -> $55,966.05, Sharpe -0.392 -> -0.235, Sortino -0.472 ->
-    # -0.294, Orders 364 -> 360, Fees $372.25 -> $367.95. Win Rate flat 45%.
-    # Step 2: 4.0 -> 4.5 improved every metric again: Net Profit +11.932% ->
-    # +12.783%, Drawdown 12.0% -> 10.7%, Expectancy +0.098 -> +0.111, End
-    # Equity $55,966.05 -> $56,391.40, Sharpe -0.235 -> -0.209, Sortino
-    # -0.294 -> -0.258, Orders 360 -> 347, Fees $367.95 -> $355.60. Win Rate
-    # 45% -> 44% (flat within noise).
-    # Step 3: 4.5 -> 5.0 improved every metric yet again: Net Profit
-    # +12.783% -> +14.024%, Drawdown 10.7% -> 8.1%, Expectancy +0.111 ->
-    # +0.130, End Equity $56,391.40 -> $57,011.75, Sharpe -0.209 -> -0.177,
-    # Sortino -0.258 -> -0.203, Fees $355.60 -> $321.25, Win Rate 44% ->
-    # 46%. BUT Orders dropped more sharply this time (347 -> 313, -9.8%,
-    # vs -1%/-3.6% in prior steps) — an accelerating decline signaling
-    # we're approaching diminishing sample size / overfitting risk.
-    # STOPPING HERE: three consecutive wins with zero tradeoffs, but the
-    # accelerating order-count drop is the signal to stop pushing this
-    # lever further rather than chase it to a smaller and smaller sample.
-    META_MIN_RULE_SCORE = 5.0
+    META_MIN_RULE_SCORE = 3.5         # was 2.0 — require a stronger rule-score consensus
 
     MORNING_WINDOW_END_MIN = 90
     MORNING_CONF_BOOST = 0.03
@@ -212,34 +189,10 @@ class CallBuyerMomentumAlgorithm(QCAlgorithm):
     AFTERNOON_RULE_INCREASE = 0.5
 
     TAKE_PROFIT_PCT = 0.50
-    # VALIDATED via backtest: widening from -0.25 to -0.35 improved every
-    # metric (105/173 baseline trades exited via STOP_LOSS at avg -30.5%,
-    # worse than -25% due to slippage + the 2-poll confirm delay -- a
-    # single-leg long call is far more volatile than -25% intraday noise).
-    # Net Profit -11.688% -> -6.559%, Drawdown 19.2% -> 12.5%, Win Rate
-    # 40% -> 50%, Expectancy -0.107 -> -0.047, Orders 383 -> 363 (fewer
-    # premature stop-outs/whipsaws), Fees $396.75 -> $370.60.
-    STOP_LOSS_PCT = -0.35
+    STOP_LOSS_PCT = -0.25
     MIN_DTE_EXIT = 7
-    # VALIDATED via backtest: widening TRAILING_ARM_GAIN from 0.30 to 0.40
-    # let winners run further before the 15% trail engages (baseline
-    # TRAILING_STOP trades exited at avg +11.99% vs TAKE_PROFIT's +54.45%,
-    # i.e. arming too early was locking in exits well short of potential).
-    # On top of the STOP_LOSS_PCT=-0.35 baseline (Net Profit -6.559%,
-    # Drawdown 12.5%, Expectancy -0.047), this flipped the strategy
-    # profitable: Net Profit -6.559% -> +3.751%, Drawdown 12.5% -> 10.5%,
-    # Expectancy -0.047 -> +0.044, End Equity $46,720.40 -> $51,875.35,
-    # Orders 363 -> 364, Fees $370.60 -> $371.65. Win Rate dipped slightly
-    # 50% -> 47% but every profitability metric improved substantially.
-    # VALIDATED via backtest: pushing TRAILING_ARM_GAIN further to 0.50
-    # continued the improvement trend: Net Profit +3.751% -> +6.658%,
-    # Expectancy +0.044 -> +0.064, End Equity $51,875.35 -> $53,328.75,
-    # Sharpe -0.505 -> -0.392, Sortino -0.557 -> -0.472 (both less
-    # negative). Tradeoff: Drawdown rose 10.5% -> 13.3% and Win Rate
-    # dipped 47% -> 45%, but every return/risk-adjusted-return metric
-    # improved, so the wider arm threshold was kept.
     TRAILING_STOP_PCT = 0.15
-    TRAILING_ARM_GAIN = 0.50
+    TRAILING_ARM_GAIN = 0.30
     MAX_NO_QUOTE_STRIKES = 8           # ~2h of no live bid (15-min checks) forces a defensive exit
 
     def initialize(self) -> None:
@@ -438,16 +391,7 @@ class CallBuyerMomentumAlgorithm(QCAlgorithm):
     def _check_exits(self) -> None:
         if self.is_warming_up:
             return
-        # QC silently converts a market order submitted while the exchange is
-        # closed into an unprotected next-day MarketOnOpen order — confirmed via
-        # a real backtest trade: a TRAILING_STOP decided at a WINNING quote (bid
-        # $8.86) filled -99.86% the next morning after gapping. A raw self.time
-        # hour check didn't reliably catch this (schedule fires off-hours too),
-        # so use the exchange calendar directly per underlying.
         for symbol, pos in list(self.positions.items()):
-            underlying_symbol = self.equity_symbols.get(pos["underlying"])
-            if underlying_symbol is None or not self.is_market_open(underlying_symbol):
-                continue
             security = self.securities.get(symbol)
             if security is None:
                 continue
@@ -464,7 +408,7 @@ class CallBuyerMomentumAlgorithm(QCAlgorithm):
                 # we've been unable to get a reliable quote instead of trusting it.
                 pos["no_quote_strikes"] = pos.get("no_quote_strikes", 0) + 1
                 if pos["no_quote_strikes"] >= self.MAX_NO_QUOTE_STRIKES:
-                    self.liquidate(symbol, tag="NO_LIQUIDITY_EXIT")
+                    self.liquidate(symbol)
                     self.debug(f"{pos['underlying']}: closed {symbol} — NO_LIQUIDITY_EXIT")
                     del self.positions[symbol]
                 continue
@@ -496,7 +440,7 @@ class CallBuyerMomentumAlgorithm(QCAlgorithm):
                     reason = f"TRAILING_STOP ({drawdown:+.1%})"
 
             if reason:
-                self.liquidate(symbol, tag=reason.split(" ")[0])
+                self.liquidate(symbol)
                 self.debug(f"{pos['underlying']}: closed {symbol} — {reason}")
                 del self.positions[symbol]
 
