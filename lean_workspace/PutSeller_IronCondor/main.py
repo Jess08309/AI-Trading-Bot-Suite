@@ -21,12 +21,28 @@ porting these here would just duplicate them, not add independent value):
 
 Run this in QuantConnect's cloud IDE (Algorithm Lab) — compiling/backtesting LEAN
 locally is not available in this workspace.
+
+Order-state safety: a multi-leg entry (short+long combo) is tracked as
+"pending" until BOTH legs confirm FILLED. If one leg fills without its hedge
+(the sibling CANCELED/INVALID, or only partially filled), this is NEVER
+silently dropped -- see _handle_orphan_leg().
 """
 from AlgorithmImports import *
+import json
 import numpy as np
 
 
 class PutSellerIronCondorAlgorithm(QCAlgorithm):
+
+    # Order statuses this port explicitly recognizes. QC has no separate
+    # REJECTED value -- rejected orders surface as INVALID. Any status value
+    # NOT in this set is treated as unknown/ambiguous and handled fail-safe
+    # (no action taken, alert only -- see _process_one_pending_entry).
+    _KNOWN_ORDER_STATUSES = (
+        OrderStatus.NEW, OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED,
+        OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.INVALID,
+        OrderStatus.NONE, OrderStatus.CANCEL_PENDING, OrderStatus.UPDATE_SUBMITTED,
+    )
 
     WATCHLIST = [
         "SPY", "QQQ", "IWM",
@@ -73,6 +89,10 @@ class PutSellerIronCondorAlgorithm(QCAlgorithm):
                                          # a market order (which was found to lose money on BOTH legs)
     LIMIT_ORDER_MAX_WAIT_MIN = 30  # cancel/relax an unfilled entry limit order after this long
 
+    MAX_ORPHAN_CLOSE_ATTEMPTS = 3  # give up auto-retrying a naked leg's own close order after this
+                                   # many confirmed submissions and ESCALATE for manual intervention
+                                   # instead -- an unbounded retry loop is its own failure mode
+
     def initialize(self) -> None:
         self.set_start_date(2024, 1, 1)
         self.set_end_date(2026, 8, 1)
@@ -94,6 +114,23 @@ class PutSellerIronCondorAlgorithm(QCAlgorithm):
         self.last_exit = {ticker: {"put": None, "call": None} for ticker in self.WATCHLIST}
         # (ticker, right) -> resting combo-limit entry order awaiting fill
         self.pending_entries = {}
+        # (ticker, right) -> incident dict; blocks NEW entries on this exact
+        # underlying+side until a human clears it (set only when one leg of a
+        # multi-leg entry fills without its hedge -- see _handle_orphan_leg)
+        self.blocked_sides = {}
+        # in-memory audit trail of orphan-leg incidents this session (also
+        # best-effort persisted to ObjectStore so it survives redeploys) --
+        # entries are NEVER removed from this list, even once resolved
+        self.incidents = []
+        # monotonic counter -> unique incident_id
+        self._incident_seq = 0
+        # (incident_id, symbol) -> tracking dict for an outstanding
+        # ORPHAN_LEG_CLOSE order whose own fill has not yet been confirmed
+        self.orphan_closes = {}
+        # Reload any unresolved incidents/orphan-close tracking from a prior
+        # session BEFORE anything else runs -- never assume an unresolved
+        # close succeeded just because the process restarted.
+        self._restore_incident_state()
 
         # rolling daily closes per underlying (SPY, already in WATCHLIST, doubles as the vol/crash filter)
         self.daily_closes = {ticker: RollingWindow[float](max(self.TREND_SMA, self.SPY_VOL_SMA) + 5) for ticker in self.WATCHLIST}
@@ -148,6 +185,7 @@ class PutSellerIronCondorAlgorithm(QCAlgorithm):
         if self.is_warming_up:
             return
         self._process_pending_entries()
+        self._reconcile_orphan_closes()
         for ticker, option_symbol in self.option_symbol_by_ticker.items():
             chain = self.current_slice.option_chains.get(option_symbol)
             if not chain:
@@ -157,42 +195,360 @@ class PutSellerIronCondorAlgorithm(QCAlgorithm):
 
     def _process_pending_entries(self) -> None:
         for key, pend in list(self.pending_entries.items()):
-            tickets = pend["tickets"]
-            statuses = [t.status for t in tickets]
-            ticker, right = key
-            if all(s == OrderStatus.FILLED for s in statuses):
-                short_ticket, long_ticket = tickets
-                real_credit = short_ticket.average_fill_price - long_ticket.average_fill_price
-                self.spreads[ticker].append({
-                    "strategy": pend["strategy"],
-                    "short_symbol": pend["short_symbol"],
-                    "long_symbol": pend["long_symbol"],
-                    "short_strike": pend["short_strike"],
-                    "expiry": pend["expiry"],
-                    "credit": real_credit,
-                    "right": right,
-                    "entry_time": self.time,
-                })
-                self.debug(f"{ticker}: {right} spread FILLED credit={real_credit:.2f} (target>={pend['target_credit']:.2f}, fraction={pend['fraction']:.2f})")
+            self._process_one_pending_entry(key, pend)
+
+    def _process_one_pending_entry(self, key, pend) -> None:
+        """Multi-leg entry order state machine.
+
+        QC's OrderTicket objects reflect live broker/engine state directly (no
+        separate "re-query" round trip exists or is needed) -- reading
+        .status/.quantity_filled here on every 15-min scan cycle IS the fresh
+        broker-state check. Handles: both legs filled; neither filled; one
+        filled/one canceled or invalid; partial fills; cancel/fill races (a
+        cancel request racing an actual fill is caught because tracking is
+        NEVER deleted on cancel alone -- the next cycle re-evaluates with
+        fresh ticket state); stale unfilled orders; and unknown/ambiguous
+        status values (fail-safe: no action, keep tracking, alert).
+        """
+        ticker, right = key
+        tickets = pend["tickets"]
+        statuses = [t.status for t in tickets]
+        filled_qty = [getattr(t, "quantity_filled", 0) or 0 for t in tickets]
+
+        if any(s not in self._KNOWN_ORDER_STATUSES for s in statuses):
+            self.error(
+                f"CRITICAL: {ticker} {right} pending entry has an UNKNOWN/ambiguous "
+                f"order status {statuses} -- taking no action, keeping pending "
+                f"record intact for re-evaluation next cycle"
+            )
+            return
+
+        # ── Both legs confirmed filled: the clean, intended outcome ──
+        if all(s == OrderStatus.FILLED for s in statuses):
+            short_ticket, long_ticket = tickets
+            real_credit = short_ticket.average_fill_price - long_ticket.average_fill_price
+            self.spreads[ticker].append({
+                "strategy": pend["strategy"],
+                "short_symbol": pend["short_symbol"],
+                "long_symbol": pend["long_symbol"],
+                "short_strike": pend["short_strike"],
+                "expiry": pend["expiry"],
+                "credit": real_credit,
+                "right": right,
+                "entry_time": self.time,
+            })
+            self.debug(f"{ticker}: {right} spread FILLED credit={real_credit:.2f} (target>={pend['target_credit']:.2f}, fraction={pend['fraction']:.2f})")
+            del self.pending_entries[key]
+            return
+
+        # ── A leg has a confirmed nonzero fill but the pair did NOT complete
+        # cleanly (sibling CANCELED/INVALID, or still working) -- a naked,
+        # unhedged leg. Never silently drop this -- always reconcile
+        # explicitly (see _handle_orphan_leg). ──
+        if any(q != 0 for q in filled_qty) and not all(s == OrderStatus.FILLED for s in statuses):
+            self._handle_orphan_leg(key, pend, tickets, statuses, filled_qty)
+            return
+
+        # ── Neither leg has any fill and BOTH are terminally CANCELED/INVALID:
+        # nothing naked, safe to relax price and retry (or give up at the
+        # floor). Using `all` (not `any`) is deliberate -- if only one leg has
+        # resolved so far, the other may still fill and must not be treated
+        # as a clean miss yet. ──
+        if all(s in (OrderStatus.CANCELED, OrderStatus.INVALID) for s in statuses):
+            next_fraction = pend["fraction"] - self.LIMIT_CREDIT_FRACTION_STEP
+            if next_fraction < self.LIMIT_CREDIT_FRACTION_FLOOR:
                 del self.pending_entries[key]
-            elif any(s in (OrderStatus.CANCELED, OrderStatus.INVALID) for s in statuses):
-                del self.pending_entries[key]
-            elif (self.time - pend["placed_time"]).total_seconds() / 60 >= self.LIMIT_ORDER_MAX_WAIT_MIN:
-                for t in tickets:
-                    if t.status not in (OrderStatus.FILLED, OrderStatus.CANCELED):
-                        t.cancel("limit order stale, relaxing price")
-                next_fraction = pend["fraction"] - self.LIMIT_CREDIT_FRACTION_STEP
-                if next_fraction < self.LIMIT_CREDIT_FRACTION_FLOOR:
-                    del self.pending_entries[key]
-                    continue
-                new_target_credit = pend["mid_credit"] * next_fraction
-                new_legs = [Leg.create(pend["short_symbol"], -1), Leg.create(pend["long_symbol"], 1)]
-                new_tickets = self.combo_limit_order(new_legs, 1, -new_target_credit)
-                pend["tickets"] = new_tickets
-                pend["target_credit"] = new_target_credit
-                pend["fraction"] = next_fraction
-                pend["placed_time"] = self.time
-                self.debug(f"{ticker}: {right} spread limit relaxed to fraction={next_fraction:.2f} target_credit>={new_target_credit:.2f}")
+                self.debug(f"{ticker}: {right} spread limit floor reached, giving up (no fill, no naked leg)")
+                return
+            new_target_credit = pend["mid_credit"] * next_fraction
+            new_legs = [Leg.create(pend["short_symbol"], -1), Leg.create(pend["long_symbol"], 1)]
+            new_tickets = self.combo_limit_order(new_legs, 1, -new_target_credit)
+            pend["tickets"] = new_tickets
+            pend["target_credit"] = new_target_credit
+            pend["fraction"] = next_fraction
+            pend["placed_time"] = self.time
+            self.debug(f"{ticker}: {right} spread limit relaxed to fraction={next_fraction:.2f} target_credit>={new_target_credit:.2f}")
+            return
+
+        # ── Still working (NEW/SUBMITTED/PARTIALLY_FILLED-with-zero-qty, or a
+        # mixed state where only one leg has resolved so far) -- apply
+        # stale-timeout handling. ──
+        if (self.time - pend["placed_time"]).total_seconds() / 60 >= self.LIMIT_ORDER_MAX_WAIT_MIN:
+            for t in tickets:
+                if t.status not in (OrderStatus.FILLED, OrderStatus.CANCELED):
+                    t.cancel("limit order stale, relaxing price")
+            # Do NOT relax/resubmit or delete in the same cycle a cancel was
+            # just requested -- cancel() can race with an actual fill. Leave
+            # tracking in place; the NEXT cycle re-reads fresh ticket state
+            # and routes to the FILLED, orphan-leg, or clean-cancel branch
+            # above as appropriate.
+            self.debug(f"{ticker}: {right} spread limit order stale, cancel requested -- re-checking next cycle")
+
+    def _handle_orphan_leg(self, key, pend, tickets, statuses, filled_qty) -> None:
+        """One leg of a multi-leg entry confirmed a nonzero fill while its
+        hedge did not complete. Per policy: NEVER auto re-hedge at market
+        (that's a second market-timing bet layered on an already-abnormal
+        state). Instead: block new entries on this exact underlying+side,
+        close ONLY the exact confirmed filled quantity of the naked leg(s),
+        raise a CRITICAL alert, and persist a full incident record BEFORE
+        removing the pending entry -- the information is preserved, never
+        silently lost.
+        """
+        ticker, right = key
+        short_ticket, long_ticket = tickets
+        self._incident_seq += 1
+        incident = {
+            "incident_id": self._incident_seq,
+            "timestamp": str(self.time),
+            "ticker": ticker,
+            "right": right,
+            "short_symbol": str(pend["short_symbol"]),
+            "long_symbol": str(pend["long_symbol"]),
+            "short_order_id": getattr(short_ticket, "order_id", None),
+            "long_order_id": getattr(long_ticket, "order_id", None),
+            "short_status": str(statuses[0]),
+            "long_status": str(statuses[1]),
+            "short_quantity_filled": filled_qty[0],
+            "long_quantity_filled": filled_qty[1],
+            "short_avg_fill_price": getattr(short_ticket, "average_fill_price", None),
+            "long_avg_fill_price": getattr(long_ticket, "average_fill_price", None),
+            # OPEN until every naked leg's own ORPHAN_LEG_CLOSE order is
+            # broker-confirmed FILLED for the exact naked quantity -- never
+            # set to RESOLVED merely because a close order was submitted.
+            "status": "OPEN",
+            # symbol -> remaining naked (signed) quantity, updated live by
+            # _reconcile_orphan_closes() as each closing order's own fill
+            # state is confirmed
+            "naked_legs": {},
+        }
+        self.error(f"CRITICAL: ORPHAN LEG — {ticker} {right} spread has one leg filled "
+                   f"without its hedge: {incident}")
+
+        # Block new entries on this exact underlying+side until a human
+        # clears it -- reuses the same (ticker, right) gate _open_new_spreads
+        # already checks for pending_entries.
+        self.blocked_sides[key] = incident
+        self.incidents.append(incident)
+
+        # Best-effort durable persistence (QC ObjectStore survives redeploys).
+        # Must never raise and block the actual leg reconciliation below.
+        try:
+            store_key = f"incident_{ticker}_{right}_{str(self.time).replace(':', '-').replace(' ', '_')}"
+            self.object_store.save(store_key, json.dumps(incident, default=str))
+        except Exception as e:
+            self.debug(f"Incident persist to ObjectStore failed (non-fatal): {e}")
+
+        # Submit (and track) an explicit, targeted close for ONLY the
+        # confirmed filled quantity of each naked leg -- never a blanket
+        # liquidate() that could also touch unrelated positions.
+        for symbol, qty in ((pend["short_symbol"], filled_qty[0]), (pend["long_symbol"], filled_qty[1])):
+            if qty:
+                self._submit_orphan_close(incident, symbol, qty)
+
+        del self.pending_entries[key]
+        self._persist_incident_state()
+
+    def _submit_orphan_close(self, incident, symbol, naked_qty) -> None:
+        """Submit (or re-submit, per the same approved policy) a targeted
+        closing order for exactly the naked quantity on one leg, and track
+        the resulting ticket so its own fill can be verified later -- the
+        close order's submission returning a ticket is NOT the same as the
+        naked leg actually being closed. The retry-tracking fields (attempts,
+        order_ids, first_detected) are preserved/incremented across repeated
+        calls for the same (incident, symbol) -- attempt count only ever
+        increases here, i.e. only after a close order is actually submitted.
+        """
+        close_qty = -naked_qty
+        ticket = self.market_order(symbol, close_qty, tag="ORPHAN_LEG_CLOSE")
+        incident["naked_legs"][symbol] = naked_qty
+        oc_key = (incident["incident_id"], symbol)
+        order_id = getattr(ticket, "order_id", None)
+        existing = self.orphan_closes.get(oc_key)
+        if existing is not None:
+            existing["ticket"] = ticket
+            existing["naked_qty"] = naked_qty
+            existing["attempts"] += 1
+            existing["last_attempt_time"] = str(self.time)
+            existing["last_status"] = ticket.status
+            if order_id is not None:
+                existing["order_ids"].append(order_id)
+            oc = existing
+        else:
+            oc = {
+                "incident": incident,
+                "incident_id": incident["incident_id"],
+                "symbol": symbol,
+                "naked_qty": naked_qty,
+                "ticket": ticket,
+                "order_ids": [order_id] if order_id is not None else [],
+                "attempts": 1,
+                "first_detected": str(self.time),
+                "last_attempt_time": str(self.time),
+                "last_status": ticket.status,
+                "escalation_reason": None,
+            }
+            self.orphan_closes[oc_key] = oc
+        self.error(f"CRITICAL: closing naked leg {symbol} qty={close_qty} "
+                   f"(incident={incident['incident_id']}, ticker={incident['ticker']} "
+                   f"right={incident['right']}, attempt={oc['attempts']}/{self.MAX_ORPHAN_CLOSE_ATTEMPTS})")
+
+    def _reconcile_orphan_closes(self) -> None:
+        """Runs every scan cycle (and once on restart before new entries are
+        permitted): verifies each outstanding ORPHAN_LEG_CLOSE order's own
+        broker-confirmed fill state. An incident is only ever marked RESOLVED
+        once its close order(s) confirm the exact naked quantity is gone --
+        never on submission alone. Never auto-hedges, never uses liquidate(),
+        never deletes an incident record.
+        """
+        for oc_key, oc in list(self.orphan_closes.items()):
+            self._reconcile_one_orphan_close(oc_key, oc)
+        self._persist_incident_state()
+
+    def _reconcile_one_orphan_close(self, oc_key, oc) -> None:
+        incident = oc["incident"]
+        symbol = oc["symbol"]
+        ticket = oc["ticket"]
+
+        if ticket is None:
+            # Restored after a restart but no live order ticket could be
+            # re-fetched -- never assume the close succeeded; wait for a
+            # human to verify broker state directly.
+            self.error(f"CRITICAL: incident={incident['incident_id']} {symbol} "
+                       f"ORPHAN_LEG_CLOSE has no live order ticket available "
+                       f"(restart recovery) -- cannot verify broker state, not "
+                       f"assuming success, incident stays {incident['status']}")
+            return
+
+        status = ticket.status
+        filled = getattr(ticket, "quantity_filled", 0) or 0
+
+        if status not in self._KNOWN_ORDER_STATUSES:
+            self.error(f"CRITICAL: incident={incident['incident_id']} {symbol} "
+                       f"ORPHAN_LEG_CLOSE has an UNKNOWN/ambiguous status {status} -- "
+                       f"not assuming success, incident stays OPEN, no retry submitted")
+            return  # never mutate residual/attempts/state on an unrecognized status
+
+        residual = oc["naked_qty"] + filled
+        oc["last_status"] = status
+
+        if residual == 0:
+            # Broker-ticket-confirmed flat for this leg (not merely "submission
+            # returned") -- resolve just this leg.
+            incident["naked_legs"].pop(symbol, None)
+            del self.orphan_closes[oc_key]
+            if not incident["naked_legs"] and incident["status"] != "ESCALATED":
+                incident["status"] = "RESOLVED"
+                self.debug(f"incident={incident['incident_id']}: all naked legs confirmed "
+                           f"closed by broker -- incident RESOLVED (record retained, not deleted)")
+            return
+
+        # Residual naked quantity remains -- reflect it on the incident record.
+        # NOTE: oc["naked_qty"] intentionally stays the fixed quantity that was
+        # requested for THIS close ticket -- it's only rebased when a NEW close
+        # order is submitted (see _submit_orphan_close). Overwriting it here
+        # would double-count the same ticket's cumulative fill on every
+        # subsequent reconcile cycle before it reaches a terminal state.
+        incident["naked_legs"][symbol] = residual
+
+        if status == OrderStatus.PARTIALLY_FILLED:
+            self.debug(f"incident={incident['incident_id']}: {symbol} ORPHAN_LEG_CLOSE "
+                       f"partially filled, residual naked qty={residual} -- current close "
+                       f"ticket still active, not submitting another close, incident stays OPEN")
+            return
+
+        if status not in (OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.INVALID):
+            # Still working (NEW/SUBMITTED/CANCEL_PENDING/UPDATE_SUBMITTED) --
+            # nothing to do yet, re-check next cycle.
+            return
+
+        # Terminal ticket state (FILLED-with-anomalous-residual, CANCELED, or
+        # INVALID) with residual still nonzero -- retry under the cap, or
+        # escalate for manual intervention once the cap is reached.
+        if oc["attempts"] >= self.MAX_ORPHAN_CLOSE_ATTEMPTS:
+            incident["status"] = "ESCALATED"
+            reason = (f"{symbol} ORPHAN_LEG_CLOSE {status} after "
+                      f"{oc['attempts']}/{self.MAX_ORPHAN_CLOSE_ATTEMPTS} attempts, "
+                      f"residual naked qty={residual} remains")
+            oc["escalation_reason"] = reason
+            self.error(f"CRITICAL: incident={incident['incident_id']} {reason} -- retry "
+                       f"cap reached, STOPPING auto-retry, MANUAL INTERVENTION REQUIRED "
+                       f"(blocked_sides entry retained)")
+            return  # never resubmit past the cap
+
+        self.error(f"CRITICAL: incident={incident['incident_id']} {symbol} ORPHAN_LEG_CLOSE "
+                   f"was {status} with residual naked qty={residual} remaining -- re-submitting "
+                   f"the approved targeted close (attempt {oc['attempts'] + 1}/"
+                   f"{self.MAX_ORPHAN_CLOSE_ATTEMPTS}, never auto-hedge, never blanket liquidate)")
+        self._submit_orphan_close(incident, symbol, residual)
+
+    def _persist_incident_state(self) -> None:
+        """Best-effort durable snapshot of all incidents + outstanding
+        orphan-close tracking metadata (no live ticket/order objects -- those
+        cannot survive a restart and must never be assumed still valid).
+        Must never raise.
+        """
+        try:
+            snapshot = {
+                "incident_seq": self._incident_seq,
+                "incidents": self.incidents,
+                "orphan_closes": [
+                    {k: v for k, v in oc.items() if k not in ("incident", "ticket")}
+                    for oc in self.orphan_closes.values()
+                ],
+            }
+            self.object_store.save("putseller_orphan_incidents", json.dumps(snapshot, default=str))
+        except Exception as e:
+            self.debug(f"Incident state persist failed (non-fatal): {e}")
+
+    def _restore_incident_state(self) -> None:
+        """Reload any unresolved incidents/outstanding orphan-close tracking
+        from a previous session. Never assumes an unresolved close succeeded
+        just because the process restarted -- restored legs' tickets are
+        re-fetched live (never trusted from the stale snapshot alone) and
+        reconciled once immediately, before any new-entry scan can run.
+        """
+        try:
+            if not self.object_store.contains_key("putseller_orphan_incidents"):
+                return
+            raw = self.object_store.read("putseller_orphan_incidents")
+            if not raw:
+                return
+            snapshot = json.loads(raw)
+        except Exception as e:
+            self.debug(f"Incident state restore failed (non-fatal, starting clean): {e}")
+            return
+
+        self._incident_seq = snapshot.get("incident_seq", 0)
+        for incident in snapshot.get("incidents", []):
+            self.incidents.append(incident)
+            if incident.get("status") in ("OPEN", "ESCALATED"):
+                self.blocked_sides[(incident["ticker"], incident["right"])] = incident
+
+        for oc_meta in snapshot.get("orphan_closes", []):
+            incident = next((i for i in self.incidents if i["incident_id"] == oc_meta["incident_id"]), None)
+            if incident is None:
+                continue
+            symbol = oc_meta["symbol"]
+            order_ids = oc_meta.get("order_ids") or []
+            last_order_id = order_ids[-1] if order_ids else None
+            ticket = None
+            if last_order_id is not None:
+                try:
+                    ticket = self.transactions.get_order_ticket(last_order_id)
+                except Exception as e:
+                    self.debug(f"Could not re-fetch order ticket {last_order_id} on restart (non-fatal): {e}")
+                    ticket = None
+            restored = dict(oc_meta)
+            restored["incident"] = incident
+            restored["ticket"] = ticket
+            self.orphan_closes[(incident["incident_id"], symbol)] = restored
+
+        if self.orphan_closes or self.incidents:
+            self.debug(f"Restored {len(self.orphan_closes)} outstanding orphan-close "
+                       f"tracking entries and {len(self.incidents)} incident records "
+                       f"from prior session")
+        # Reconcile restored state before permitting any new-entry scan.
+        self._reconcile_orphan_closes()
 
     # ── Exit management ──────────────────────────────────────────
     def _check_exits(self, ticker: str, chain) -> None:
@@ -268,6 +624,7 @@ class PutSellerIronCondorAlgorithm(QCAlgorithm):
             trend != "down"  # don't sell puts into a confirmed downtrend
             and not self._in_cooldown(ticker, "put")
             and (ticker, "put") not in self.pending_entries
+            and (ticker, "put") not in self.blocked_sides  # orphan-leg incident on this side
         ):
             put_spread = self._find_credit_spread(chain, underlying_price, width, OptionRight.PUT)
             if put_spread and self._total_open("put") < self.MAX_POSITIONS:
@@ -278,6 +635,7 @@ class PutSellerIronCondorAlgorithm(QCAlgorithm):
             trend != "up"  # don't sell calls into a confirmed uptrend
             and not self._in_cooldown(ticker, "call")
             and (ticker, "call") not in self.pending_entries
+            and (ticker, "call") not in self.blocked_sides  # orphan-leg incident on this side
         ):
             call_spread = self._find_credit_spread(chain, underlying_price, width, OptionRight.CALL)
             if call_spread and self._total_open("call") < self.MAX_CALL_POSITIONS:

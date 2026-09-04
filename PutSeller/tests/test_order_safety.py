@@ -61,6 +61,8 @@ def make_engine():
     eng.api = MagicMock()
     eng.risk = MagicMock()
     eng.positions = {}
+    eng.incidents = []
+    eng.blocked_sides = {}
     eng._entry_attempts = {}
     eng._regime_flip_state = {}
     eng._current_regime = None
@@ -555,6 +557,200 @@ class TestAdoptionSafety(unittest.TestCase):
                                      "long_symbol": self.LONG}
         self._run_adoption(eng, self._broker_positions(0.76, 0.38))
         self.assertEqual(len(eng.positions), 1)  # unchanged
+
+
+# ── F10: exactly-one-leg reconciliation ──────────────────
+
+class TestExactlyOneLegReconciliation(unittest.TestCase):
+    """A tracked two-leg spread must NEVER be treated as valid when the
+    broker confirms only one leg. Covers both-legs/neither-leg/one-leg
+    branches, broker-unavailable handling, adoption safety, idempotency,
+    the persistent incident record, and the new-entry block it drives."""
+
+    def test_both_legs_present_kept_active_no_incident(self):
+        eng = make_engine()
+        pos_id, pos = make_position()
+        eng.positions[pos_id] = pos
+        eng.api.get_option_positions.return_value = {
+            pos["short_symbol"]: -3, pos["long_symbol"]: 3,
+        }
+        removed = eng._reconcile_position(pos_id)
+        self.assertFalse(removed)
+        self.assertIn(pos_id, eng.positions)
+        self.assertEqual(eng.incidents, [])
+        self.assertEqual(eng.blocked_sides, {})
+        eng.risk.record_trade.assert_not_called()
+
+    def test_neither_leg_present_ghost_removed_and_incident_resolved(self):
+        """A prior one-leg incident for this position must be marked
+        RESOLVED (not deleted) once the broker confirms it's fully flat."""
+        eng = make_engine()
+        pos_id, pos = make_position()
+        eng.positions[pos_id] = pos
+        key = (pos["underlying"], pos["spread_type"])
+        incident = {"pos_id": pos_id, "status": "OPEN"}
+        eng.incidents.append(incident)
+        eng.blocked_sides[key] = incident
+
+        eng.api.get_option_positions.return_value = {}
+        removed = eng._reconcile_position(pos_id)
+
+        self.assertTrue(removed)
+        self.assertNotIn(pos_id, eng.positions)
+        self.assertEqual(incident["status"], "RESOLVED")
+        self.assertNotIn(key, eng.blocked_sides)
+        self.assertIn(incident, eng.incidents)  # audit record retained, not deleted
+
+    def test_short_leg_only_creates_incident_and_blocks_side(self):
+        eng = make_engine()
+        pos_id, pos = make_position()
+        eng.positions[pos_id] = pos
+        eng.api.get_option_positions.return_value = {pos["short_symbol"]: -3}
+
+        removed = eng._reconcile_position(pos_id)
+
+        self.assertFalse(removed)
+        self.assertIn(pos_id, eng.positions)  # remaining leg is real, keep tracking
+        self.assertEqual(len(eng.incidents), 1)
+        incident = eng.incidents[0]
+        self.assertEqual(incident["status"], "OPEN")
+        self.assertEqual(incident["remaining_leg"], pos["short_symbol"])
+        self.assertEqual(incident["missing_leg"], pos["long_symbol"])
+        self.assertEqual(incident["remaining_qty"], -3)
+        key = ("XYZ", "put")
+        self.assertIn(key, eng.blocked_sides)
+        self.assertIs(eng.blocked_sides[key], incident)
+        eng.risk.record_trade.assert_not_called()
+        eng._log_trade.assert_not_called()
+
+    def test_long_leg_only_creates_incident_and_blocks_side(self):
+        eng = make_engine()
+        pos_id, pos = make_position()
+        eng.positions[pos_id] = pos
+        eng.api.get_option_positions.return_value = {pos["long_symbol"]: 3}
+
+        eng._reconcile_position(pos_id)
+
+        incident = eng.incidents[0]
+        self.assertEqual(incident["remaining_leg"], pos["long_symbol"])
+        self.assertEqual(incident["missing_leg"], pos["short_symbol"])
+        self.assertEqual(incident["remaining_qty"], 3)
+        self.assertIn(("XYZ", "put"), eng.blocked_sides)
+
+    def test_one_leg_partial_quantity_is_recorded_accurately(self):
+        """Broker shows the short leg but at a smaller qty than tracked —
+        the actual broker quantity must be recorded, never fabricated."""
+        eng = make_engine()
+        pos_id, pos = make_position(qty=3)
+        eng.positions[pos_id] = pos
+        eng.api.get_option_positions.return_value = {pos["short_symbol"]: -1}
+
+        eng._reconcile_position(pos_id)
+
+        incident = eng.incidents[0]
+        self.assertEqual(incident["remaining_qty"], -1)
+
+    def test_broker_state_none_preserves_local_and_incident_state(self):
+        eng = make_engine()
+        pos_id, pos = make_position()
+        eng.positions[pos_id] = pos
+        eng.api.get_option_positions.return_value = None
+
+        removed = eng._reconcile_position(pos_id)
+
+        self.assertFalse(removed)
+        self.assertIn(pos_id, eng.positions)
+        self.assertEqual(eng.incidents, [])
+        self.assertEqual(eng.blocked_sides, {})
+
+    def test_broker_state_raises_exception_preserves_state(self):
+        eng = make_engine()
+        pos_id, pos = make_position()
+        eng.positions[pos_id] = pos
+        eng.api.get_option_positions.side_effect = ConnectionError("timeout")
+
+        removed = eng._reconcile_position(pos_id)
+
+        self.assertFalse(removed)
+        self.assertIn(pos_id, eng.positions)
+        self.assertEqual(eng.incidents, [])
+
+    def test_foreign_sibling_position_does_not_affect_reconciliation(self):
+        """An unrelated sibling-bot contract present in the broker's option
+        positions must not influence reconciliation of OUR tracked spread —
+        only our own short/long symbols are ever looked up."""
+        eng = make_engine()
+        pos_id, pos = make_position()
+        eng.positions[pos_id] = pos
+        eng.api.get_option_positions.return_value = {
+            pos["short_symbol"]: -3, pos["long_symbol"]: 3,
+            "CIFR251219C00010000": -2,  # foreign/sibling-bot leg, irrelevant here
+        }
+        removed = eng._reconcile_position(pos_id)
+        self.assertFalse(removed)
+        self.assertEqual(eng.incidents, [])
+
+    def test_duplicate_reconciliation_is_idempotent(self):
+        """Reconciling the same unresolved one-leg incident twice must update
+        it in place, never create a second incident record."""
+        eng = make_engine()
+        pos_id, pos = make_position()
+        eng.positions[pos_id] = pos
+        eng.api.get_option_positions.return_value = {pos["short_symbol"]: -3}
+
+        eng._reconcile_position(pos_id)
+        eng._reconcile_position(pos_id)
+
+        self.assertEqual(len(eng.incidents), 1)
+        self.assertEqual(eng.incidents[0]["status"], "OPEN")
+
+    def test_exactly_one_leg_incident_remains_recorded(self):
+        """The incident stays in eng.incidents (audit trail) even across
+        further reconciliation cycles that don't resolve it."""
+        eng = make_engine()
+        pos_id, pos = make_position()
+        eng.positions[pos_id] = pos
+        eng.api.get_option_positions.return_value = {pos["short_symbol"]: -3}
+        eng._reconcile_position(pos_id)
+        eng._reconcile_position(pos_id)
+        eng._reconcile_position(pos_id)
+        self.assertEqual(len(eng.incidents), 1)
+        self.assertIn(eng.incidents[0], eng.incidents)
+
+    def test_blocked_entry_behavior_after_one_leg_detection(self):
+        eng = make_engine()
+        pos_id, pos = make_position()
+        eng.positions[pos_id] = pos
+        eng.api.get_option_positions.return_value = {pos["short_symbol"]: -3}
+        eng._reconcile_position(pos_id)
+
+        self.assertTrue(eng._is_entry_blocked("XYZ", "put"))
+        self.assertFalse(eng._is_entry_blocked("XYZ", "call"))
+        self.assertFalse(eng._is_entry_blocked("ABC", "put"))
+
+    def test_debit_spread_still_not_adopted_with_incident_tracking_present(self):
+        """Regression: adoption's debit-spread guard is unaffected by the
+        new incident/blocked_sides tracking added this phase."""
+        eng = make_engine()
+        eng.incidents = []
+        eng.blocked_sides = {}
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = [
+            {"symbol": "CIFR251219C00010000", "qty": "-1", "asset_class": "us_option",
+             "avg_entry_price": "0.38", "market_value": "0"},
+            {"symbol": "CIFR251219C00012000", "qty": "1", "asset_class": "us_option",
+             "avg_entry_price": "0.76", "market_value": "0"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch("requests.get", return_value=resp):
+            old_cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                eng._adopt_orphaned_spreads()
+            finally:
+                os.chdir(old_cwd)
+        self.assertEqual(len(eng.positions), 0)
 
 
 if __name__ == "__main__":

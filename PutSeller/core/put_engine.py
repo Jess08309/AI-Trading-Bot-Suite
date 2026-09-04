@@ -66,6 +66,10 @@ class PutSellerEngine:
         self.api = PutSellerAPI(config)
         self.risk = RiskManager(config)
         self.positions: Dict[str, Dict[str, Any]] = {}
+        # Exactly-one-leg reconciliation incidents (never deleted, only marked
+        # RESOLVED) and the new-entry gate they drive.
+        self.incidents: List[Dict[str, Any]] = []
+        self.blocked_sides: Dict[tuple, Dict[str, Any]] = {}
         self.running = False
         self._last_scan = 0.0
         self._last_check = 0.0
@@ -802,83 +806,195 @@ class PutSellerEngine:
         self._save_positions()
 
     # ── Broker Reconciliation ────────────────────────────
-    def _reconcile_position(self, pos_id: str) -> bool:
+    def _reconcile_position(self, pos_id: str,
+                             broker_legs: Optional[Dict[str, int]] = None) -> bool:
         """Verify a single tracked position against broker ground truth.
 
-        If the broker shows NEITHER leg, the local entry is a ghost (already
-        closed/expired at the broker) — record it and remove it so the bot
-        stops retrying doomed close orders. Returns True if a ghost was removed.
+        - Both legs present: active spread — preserve tracking, no action.
+        - Neither leg present: ghost (already closed/expired at the broker)
+          — record it, remove local tracking, and resolve any prior
+          exactly-one-leg incident for this position (now fully flat).
+        - Exactly one leg present: NEVER treated as a valid two-leg spread —
+          escalates via `_handle_one_leg_incident` (CRITICAL alert + incident
+          record + blocks new entries for this underlying/side). Local
+          tracking is preserved (the remaining leg is a real position).
+        - Broker state unavailable (None, exception, or non-dict/malformed
+          response): local position AND incident state are preserved as-is,
+          an alert is logged, and reconciliation is retried on the next call.
+
+        Returns True only when a ghost position was removed.
         """
         pos = self.positions.get(pos_id)
         if not pos:
             return False
 
-        broker_legs = self.api.get_option_positions()
         if broker_legs is None:
+            try:
+                broker_legs = self.api.get_option_positions()
+            except Exception as e:
+                log.error(f"Reconcile {pos_id}: broker fetch raised {e} — "
+                          f"preserving local state, will retry")
+                return False
+
+        if broker_legs is None or not isinstance(broker_legs, dict):
             log.warning(f"Reconcile {pos_id}: could not fetch broker positions — skipping")
             return False
 
         short_at_broker = pos["short_symbol"] in broker_legs
         long_at_broker = pos["long_symbol"] in broker_legs
 
-        if short_at_broker or long_at_broker:
-            log.info(f"Reconcile {pos_id}: legs still at broker "
-                     f"(short={short_at_broker}, long={long_at_broker}) — keeping")
+        if short_at_broker and long_at_broker:
+            log.info(f"Reconcile {pos_id}: both legs confirmed at broker — "
+                     f"spread active, no action needed")
             return False
 
-        # Ghost: broker is flat on both legs. Use last-known mark as P&L
-        # estimate (actual fill data may be unavailable for old orders).
-        credit = pos.get("credit_per_share", 0)
-        current_debit = pos.get("current_debit", credit)
-        qty = pos.get("qty", 1)
-        est_pnl = (credit - current_debit) * qty * 100
-        est_pnl_pct = ((credit - current_debit) / credit * 100) if credit > 0 else 0
+        if not short_at_broker and not long_at_broker:
+            # Ghost: broker is flat on both legs. Use last-known mark as P&L
+            # estimate (actual fill data may be unavailable for old orders).
+            credit = pos.get("credit_per_share", 0)
+            current_debit = pos.get("current_debit", credit)
+            qty = pos.get("qty", 1)
+            est_pnl = (credit - current_debit) * qty * 100
+            est_pnl_pct = ((credit - current_debit) / credit * 100) if credit > 0 else 0
 
+            log.critical(
+                f"RECONCILE GHOST: {pos_id} not present at broker — removing from "
+                f"tracking. Estimated PnL ${est_pnl:+,.2f} (from last mark; verify "
+                f"against broker order history)"
+            )
+
+            self.risk.record_trade(est_pnl, pos["underlying"],
+                                   spread_type=pos.get("spread_type", "put"))
+            self._log_trade({
+                "timestamp": datetime.now().isoformat(),
+                "underlying": pos["underlying"],
+                "spread_type": pos.get("spread_type", "put"),
+                "short_strike": pos["short_strike"],
+                "long_strike": pos["long_strike"],
+                "expiration": pos["expiration"],
+                "qty": qty,
+                "credit": credit,
+                "close_debit": current_debit,
+                "pnl": est_pnl,
+                "pnl_pct": est_pnl_pct,
+                "hold_days": 0,
+                "exit_reason": "RECONCILED_GHOST (broker flat; PnL estimated from last mark)",
+                "open_date": pos.get("open_date", ""),
+            })
+            # Now fully flat at the broker — resolve any open one-leg incident
+            # for this position (never delete the audit record, just close it).
+            key = (pos["underlying"], pos.get("spread_type", "put"))
+            existing = self.blocked_sides.get(key)
+            if existing is not None and existing.get("pos_id") == pos_id \
+                    and existing.get("status") == "OPEN":
+                existing["status"] = "RESOLVED"
+                existing["last_reconcile_time"] = datetime.now().isoformat()
+                del self.blocked_sides[key]
+            del self.positions[pos_id]
+            self._save_positions()
+            return True
+
+        # Exactly one leg present — never a valid two-leg spread.
+        self._handle_one_leg_incident(pos_id, pos, broker_legs, short_at_broker, long_at_broker)
+        return False
+
+    def _handle_one_leg_incident(self, pos_id: str, pos: Dict[str, Any],
+                                  broker_legs: Dict[str, int],
+                                  short_at_broker: bool, long_at_broker: bool) -> None:
+        """Exactly one leg confirmed at the broker for a tracked spread.
+
+        Never fabricates credit/debit/PnL/hedge information, never opens a
+        replacement hedge, and never auto-closes the naked leg (the engine
+        has no existing single-leg-only closing path that is safe to use
+        here — a full spread close would be wrong since only one leg
+        exists). Instead: CRITICAL alert, a persistent incident record, and
+        a block on new entries for this underlying + strategy side until a
+        human resolves it. Local position tracking is preserved (the
+        remaining leg is real). Idempotent: re-detecting the same unresolved
+        incident updates it in place rather than duplicating it.
+        """
+        underlying = pos["underlying"]
+        spread_type = pos.get("spread_type", "put")
+        key = (underlying, spread_type)
+        remaining_symbol = pos["short_symbol"] if short_at_broker else pos["long_symbol"]
+        missing_symbol = pos["long_symbol"] if short_at_broker else pos["short_symbol"]
+        remaining_qty = broker_legs.get(remaining_symbol)
+        now_iso = datetime.now().isoformat()
+        broker_status = {"short_at_broker": short_at_broker, "long_at_broker": long_at_broker}
+
+        existing = self.blocked_sides.get(key)
+        if existing is not None and existing.get("pos_id") == pos_id \
+                and existing.get("status") == "OPEN":
+            existing["remaining_qty"] = remaining_qty
+            existing["broker_status"] = broker_status
+            existing["last_reconcile_time"] = now_iso
+            log.critical(
+                f"EXACTLY-ONE-LEG (still unresolved): {pos_id} {remaining_symbol} "
+                f"qty={remaining_qty} remains at broker, {missing_symbol} is gone — "
+                f"new {underlying} {spread_type} entries stay blocked, manual "
+                f"intervention required"
+            )
+            return
+
+        incident = {
+            "incident_id": len(self.incidents) + 1,
+            "pos_id": pos_id,
+            "underlying": underlying,
+            "spread_type": spread_type,
+            "remaining_leg": remaining_symbol,
+            "missing_leg": missing_symbol,
+            "remaining_qty": remaining_qty,
+            "broker_status": broker_status,
+            "first_detected": now_iso,
+            "last_reconcile_time": now_iso,
+            "status": "OPEN",
+            "escalation_reason": (
+                f"{remaining_symbol} remains at broker (qty={remaining_qty}) while "
+                f"{missing_symbol} is gone — naked leg, not a valid two-leg spread"
+            ),
+        }
+        self.incidents.append(incident)
+        self.blocked_sides[key] = incident
         log.critical(
-            f"RECONCILE GHOST: {pos_id} not present at broker — removing from "
-            f"tracking. Estimated PnL ${est_pnl:+,.2f} (from last mark; verify "
-            f"against broker order history)"
+            f"EXACTLY-ONE-LEG DETECTED: {pos_id} ({underlying} {spread_type}) — "
+            f"{remaining_symbol} qty={remaining_qty} remains at broker, "
+            f"{missing_symbol} is gone. NOT treating as a valid spread. Blocking "
+            f"new {underlying} {spread_type} entries. No auto-hedge, no fabricated "
+            f"PnL — manual intervention required."
         )
 
-        self.risk.record_trade(est_pnl, pos["underlying"],
-                               spread_type=pos.get("spread_type", "put"))
-        self._log_trade({
-            "timestamp": datetime.now().isoformat(),
-            "underlying": pos["underlying"],
-            "spread_type": pos.get("spread_type", "put"),
-            "short_strike": pos["short_strike"],
-            "long_strike": pos["long_strike"],
-            "expiration": pos["expiration"],
-            "qty": qty,
-            "credit": credit,
-            "close_debit": current_debit,
-            "pnl": est_pnl,
-            "pnl_pct": est_pnl_pct,
-            "hold_days": 0,
-            "exit_reason": "RECONCILED_GHOST (broker flat; PnL estimated from last mark)",
-            "open_date": pos.get("open_date", ""),
-        })
-        del self.positions[pos_id]
-        self._save_positions()
-        return True
+    def _is_entry_blocked(self, underlying: str, spread_type: str) -> bool:
+        """True if an unresolved exactly-one-leg incident blocks new entries
+        for this underlying + strategy side."""
+        return (underlying, spread_type) in self.blocked_sides
 
     def _reconcile_all_positions(self):
-        """Sweep all tracked positions against broker state, removing ghosts."""
+        """Sweep all tracked positions against broker state.
+
+        Fetches broker positions ONCE per sweep and checks every tracked
+        position (not just suspected ghosts) so exactly-one-leg incidents
+        are detected here too, not only via the close-failure circuit
+        breaker. Broker-unavailable (None/exception/malformed) preserves
+        all local state and retries on the next sweep.
+        """
         if not self.positions:
             return
-        broker_legs = self.api.get_option_positions()
-        if broker_legs is None:
+        try:
+            broker_legs = self.api.get_option_positions()
+        except Exception as e:
+            log.error(f"Reconcile sweep: broker fetch raised {e} — "
+                      f"skipping (state preserved)")
+            return
+        if broker_legs is None or not isinstance(broker_legs, dict):
             log.warning("Reconcile sweep: could not fetch broker positions — skipping")
             return
-        ghosts = [
-            pos_id for pos_id, pos in self.positions.items()
-            if pos["short_symbol"] not in broker_legs
-            and pos["long_symbol"] not in broker_legs
-        ]
-        for pos_id in ghosts:
-            self._reconcile_position(pos_id)
-        if ghosts:
-            log.info(f"Reconcile sweep: removed {len(ghosts)} ghost position(s)")
+        removed = 0
+        for pos_id in list(self.positions.keys()):
+            if self._reconcile_position(pos_id, broker_legs=broker_legs):
+                removed += 1
+        if removed:
+            log.info(f"Reconcile sweep: removed {removed} ghost position(s)")
+
 
     # ── Opportunity Scanner ──────────────────────────────
     def _scan_opportunities(self):
@@ -1089,7 +1205,9 @@ class PutSellerEngine:
                 break
 
             # ── Check put side ───────────
-            if put_opened < put_budget and put_count + put_opened < effective_max_puts:
+            if self._is_entry_blocked(symbol, "put"):
+                log.debug(f"{symbol}: put side blocked — unresolved exactly-one-leg incident")
+            elif put_opened < put_budget and put_count + put_opened < effective_max_puts:
                 can_open, reason = self.risk.can_open_position(
                     len(self.positions), symbol, self.positions,
                     spread_type="put", account=acct
@@ -1117,7 +1235,9 @@ class PutSellerEngine:
                     log.debug(f"{symbol}: skip put — {reason}")
 
             # ── Check call side ──────────
-            if (call_opened < call_budget and self.config.CALL_SPREADS_ENABLED
+            if self._is_entry_blocked(symbol, "call"):
+                log.debug(f"{symbol}: call side blocked — unresolved exactly-one-leg incident")
+            elif (call_opened < call_budget and self.config.CALL_SPREADS_ENABLED
                     and call_count + call_opened < effective_max_calls):
                 can_open_call, call_reason = self.risk.can_open_position(
                     len(self.positions), symbol, self.positions,
