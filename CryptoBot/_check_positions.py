@@ -1,7 +1,11 @@
-import json, urllib.request
+import json, os, urllib.request
 
-KEY = "PKO4HHAS2T2YYVSCQMWNIE4EA4"
-SECRET = "4cjicUMnxdQb199af8s4mYTrmL64ZNXyRU7PzbrivrEn"
+from dotenv import load_dotenv
+
+load_dotenv("cryptotrades/.env", override=False)
+
+KEY = os.environ["ALPACA_API_KEY"]
+SECRET = os.environ["ALPACA_API_SECRET"]
 
 req = urllib.request.Request(
     "https://paper-api.alpaca.markets/v2/positions",
