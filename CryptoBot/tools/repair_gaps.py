@@ -19,6 +19,15 @@ re-fetches only those windows (reusing the same fetch_candles() functions and
 symbol-resolution logic as the two downloaders), so it's fast and doesn't
 require re-downloading whole files.
 
+After repair, any windows that STILL can't be fetched (retried directly here,
+so not just a transient rate-limit blip) are reported separately as likely
+genuine exchange-side gaps (e.g. exchange downtime, a symbol being delisted
+mid-window) rather than fetch failures -- this distinction matters for the
+baseline gate: a few minutes of real exchange downtime is not a data-quality
+bug, whereas our own fetch bugs are. A gap_report.json manifest is written to
+each source's OUTPUT_DIR summarizing per-symbol coverage for the baseline
+report to pick up.
+
 Usage:
     cd CryptoBot/tools   (or wherever download_6mo_candles.py / this file live)
     python3 repair_gaps.py --source spot
@@ -27,6 +36,7 @@ Usage:
 """
 import argparse
 import csv
+import json
 import os
 import sys
 import time
@@ -84,8 +94,13 @@ def _repair(path, label, fetch_symbol, threshold, fetch_fn, parse_fn, chunk_minu
     if not missing or coverage_before >= threshold:
         print(f"  {label}: OK -- {before:,}/{expected_total:,} rows ({coverage_before:.1%}), "
               f"{len(missing):,} missing minutes -- no repair needed")
+        windows = [
+            {"start": datetime.fromtimestamp(w[0], tz=timezone.utc).isoformat(),
+             "end": datetime.fromtimestamp(w[1], tz=timezone.utc).isoformat()}
+            for w in contiguous_windows(missing)
+        ]
         return {"symbol": label, "before": before, "after": before, "expected": expected_total,
-                "repaired": 0, "still_missing": len(missing)}
+                "repaired": 0, "still_missing": len(missing), "still_missing_windows": windows}
 
     print(f"  {label}: {before:,}/{expected_total:,} rows ({coverage_before:.1%}) -- "
           f"{len(missing):,} missing minutes, repairing via {fetch_symbol}...")
@@ -117,12 +132,26 @@ def _repair(path, label, fetch_symbol, threshold, fetch_fn, parse_fn, chunk_minu
         writer.writeheader()
         writer.writerows(ordered)
 
-    still_missing = sum(1 for t in expected_ts if t not in existing)
+    still_missing_ts = sorted(t for t in expected_ts if t not in existing)
+    still_missing = len(still_missing_ts)
+    still_missing_windows = [
+        {"start": datetime.fromtimestamp(w[0], tz=timezone.utc).isoformat(),
+         "end": datetime.fromtimestamp(w[1], tz=timezone.utc).isoformat()}
+        for w in contiguous_windows(still_missing_ts)
+    ]
     coverage_after = (after / expected_total) if expected_total else 0.0
     print(f"  {label}: repaired {fetched_count:,} candles -- now {after:,}/{expected_total:,} "
           f"rows ({coverage_after:.1%}), {still_missing:,} still missing")
+    if still_missing_windows:
+        print(f"  {label}: {len(still_missing_windows)} unfetchable window(s) after retry -- "
+              "likely genuine exchange-side gaps (no trade printed), not fetch failures:")
+        for w in still_missing_windows[:10]:
+            print(f"      {w['start']} -> {w['end']}")
+        if len(still_missing_windows) > 10:
+            print(f"      ... and {len(still_missing_windows) - 10} more (see gap_report.json)")
     return {"symbol": label, "before": before, "after": after, "expected": expected_total,
-            "repaired": fetched_count, "still_missing": still_missing}
+            "repaired": fetched_count, "still_missing": still_missing,
+            "still_missing_windows": still_missing_windows}
 
 
 def repair_spot(symbol, threshold):
@@ -177,6 +206,17 @@ def main():
         flag = "  <-- FLAG (<80%)" if cov < 0.80 else ""
         print(f"  {r['symbol']:14s} {r['after']:>7,}/{r['expected']:>7,} {cov:10.1%}{flag}")
     print("=" * 72)
+
+    out_dir = spot_dl.OUTPUT_DIR if args.source == "spot" else fut_dl.OUTPUT_DIR
+    report_path = os.path.join(out_dir, "gap_report.json")
+    with open(report_path, "w") as f:
+        json.dump({r["symbol"]: {
+            "rows": r["after"], "expected": r["expected"],
+            "coverage": (r["after"] / r["expected"]) if r["expected"] else 0.0,
+            "repaired_candles": r["repaired"],
+            "exchange_side_gaps": r["still_missing_windows"],
+        } for r in results}, f, indent=2)
+    print(f"Gap report written to {report_path}")
 
 
 if __name__ == "__main__":
