@@ -19,6 +19,16 @@ run with SIM_REALISM_PROFILE=strict for the most conservative (worst-case)
 execution-cost assumptions (higher slippage, partial fills, funding costs,
 higher fees).
 
+NOTE ON MODEL DISCLOSURE: --model / DEFAULT_MODEL_PATH here loads a
+MarketPredictor model via config.ML_MODEL_PATH (data/models/market_model.joblib
+by default). The LIVE trading bot (cryptotrades/core/trading_engine.py's
+TradingEngine) loads a DIFFERENT artifact by default (models/trading_model.joblib,
+via a different model-loading code path) and continuously self-retrains it on a
+schedule -- the two are not the same model/pipeline. The persisted report below
+records model_path + model_mtime for whichever artifact THIS script actually
+loaded, precisely so this discrepancy can be checked/flagged rather than
+silently assumed away when interpreting gate results.
+
 Usage:
     cd CryptoBot
     SIM_REALISM_PROFILE=strict python3 backtest/run_baseline.py
@@ -30,6 +40,7 @@ import json
 import os
 import sys
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Dict, List
 
 # Make cryptotrades importable whether run from CryptoBot/ or repo root.
@@ -189,9 +200,13 @@ def main():
 
     # Persist full report for later reference / PR writeup.
     os.makedirs(os.path.dirname(REPORT_PATH), exist_ok=True)
+    model_mtime = os.path.getmtime(args.model) if os.path.exists(args.model) else None
     report = {
         "sim_realism_profile": live_config.SIM_REALISM_PROFILE,
         "model_path": args.model,
+        "model_mtime": (
+            datetime.fromtimestamp(model_mtime, tz=timezone.utc).isoformat() if model_mtime else None
+        ),
         "candle_size": args.candle_size,
         "per_symbol": {
             key: {
