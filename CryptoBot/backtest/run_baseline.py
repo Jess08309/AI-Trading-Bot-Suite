@@ -106,24 +106,37 @@ def split_futures_by_direction(results: Dict[str, BacktestResult]) -> Dict[str, 
     return buckets
 
 
+def _bucket_stats(b: dict) -> dict:
+    trades = b["trades"]
+    win_rate = (b["wins"] / trades * 100.0) if trades else 0.0
+    profit_factor = (b["gross_profit"] / b["gross_loss"]) if b["gross_loss"] > 0 else (
+        float("inf") if b["gross_profit"] > 0 else 0.0
+    )
+    return {
+        "trades": trades,
+        "wins": b["wins"],
+        "win_rate": win_rate,
+        "pnl_usd": b["pnl_usd"],
+        "gross_profit": b["gross_profit"],
+        "gross_loss": b["gross_loss"],
+        "profit_factor": profit_factor,
+        "exit_reasons": dict(b["exit_reasons"]),
+    }
+
+
 def print_long_vs_short(buckets: Dict[str, dict]):
     print(f"\n{'='*70}")
     print(f"{'FUTURES: LONG vs SHORT BASELINE':^70}")
     print(f"{'='*70}")
     for direction in ("long", "short"):
-        b = buckets[direction]
-        trades = b["trades"]
-        win_rate = (b["wins"] / trades * 100.0) if trades else 0.0
-        profit_factor = (b["gross_profit"] / b["gross_loss"]) if b["gross_loss"] > 0 else (
-            float("inf") if b["gross_profit"] > 0 else 0.0
-        )
+        stats = _bucket_stats(buckets[direction])
         print(f"\n  {direction.upper()}:")
-        print(f"    Trades:        {trades}")
-        print(f"    Win rate:      {win_rate:.1f}%")
-        print(f"    Net P&L:       ${b['pnl_usd']:+,.2f}")
-        print(f"    Profit factor: {profit_factor:.2f}")
-        if b["exit_reasons"]:
-            print(f"    Exit reasons:  {dict(b['exit_reasons'])}")
+        print(f"    Trades:        {stats['trades']}")
+        print(f"    Win rate:      {stats['win_rate']:.1f}%")
+        print(f"    Net P&L:       ${stats['pnl_usd']:+,.2f}")
+        print(f"    Profit factor: {stats['profit_factor']:.2f}")
+        if stats["exit_reasons"]:
+            print(f"    Exit reasons:  {stats['exit_reasons']}")
     print(f"\n{'='*70}")
 
 
@@ -194,12 +207,7 @@ def main():
             for key, r in results.items()
         },
         "futures_long_vs_short": {
-            direction: {
-                "trades": b["trades"],
-                "wins": b["wins"],
-                "pnl_usd": b["pnl_usd"],
-                "exit_reasons": dict(b["exit_reasons"]),
-            }
+            direction: _bucket_stats(b)
             for direction, b in long_short_buckets.items()
         },
     }
