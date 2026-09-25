@@ -29,6 +29,21 @@ to determine, per symbol, which ticker is actually tradeable/has data:
 A manifest of symbol -> actual source ticker used, row count, and date
 range is written to data/historical/1min_futures/_symbol_sources.json.
 
+GAP HANDLING: any chunk that returns no data after MAX_RETRIES is recorded in
+failed_chunks.json (per symbol + window) instead of being silently dropped.
+At the end of the run, all recorded failed chunks get one more retry pass;
+anything still failing after that is left in failed_chunks.json and is very
+likely a genuine exchange-side gap rather than a fetch problem -- see
+tools/repair_gaps.py for a standalone tool that does the same surgical
+re-fetch against existing files.
+
+Resume check: a symbol is only considered "already complete" (skipped) if its
+existing data covers >=95% of the expected 6-month row count AND its largest
+interior gap is <=10 minutes. Otherwise it's resumed/re-fetched normally --
+this replaces an old check that only looked at whether the earliest existing
+row reached the 6-month boundary (which let PI_LTCUSD get marked "complete"
+at 78.9% coverage).
+
 API: GET https://futures.kraken.com/api/charts/v1/trade/{symbol}/1m?from=<epoch>&to=<epoch>
 Response: {"candles": [{"time": ms_epoch, "open", "high", "low", "close", "volume"}, ...]}
 Paged backwards in 1-day (1440-minute) chunks to stay well under any
@@ -66,14 +81,19 @@ SYMBOL_OVERRIDES = {
 OUTPUT_DIR = os.environ.get("FUTURES_OUTPUT_DIR") or os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "data", "historical", "1min_futures"
 )
+FAILED_CHUNKS_PATH = os.path.join(OUTPUT_DIR, "failed_chunks.json")
 MONTHS = 6                  # How many months back
 RESOLUTION = "1m"           # 1-minute candles
 CHUNK_MINUTES = 1440        # page backwards 1 day at a time
 RATE_LIMIT_SEC = 0.5        # polite rate limit (public endpoint, no auth)
 MAX_RETRIES = 5
+MIN_COVERAGE = 0.95         # resume-check: fraction of expected rows required
+MAX_INTERIOR_GAP_MIN = 10   # resume-check: largest allowed gap between rows
 
 BASE_URL = "https://futures.kraken.com/api/charts/v1/trade"
 INSTRUMENTS_URL = "https://futures.kraken.com/derivatives/api/v3/instruments"
+
+FAILED_CHUNKS = []  # accumulated across all symbols this run
 
 
 def fetch_tradeable_symbols() -> set:
@@ -126,6 +146,80 @@ def fetch_candles(symbol: str, start: datetime, end: datetime) -> list:
     return []
 
 
+def _record_failed_chunk(live_symbol: str, fetch_symbol: str, start: datetime, end: datetime):
+    print(f"  WARNING: {live_symbol}: no data via {fetch_symbol} for chunk "
+          f"{start.isoformat()} -> {end.isoformat()} after {MAX_RETRIES} retries -- "
+          "recorded in failed_chunks.json")
+    FAILED_CHUNKS.append({
+        "live_symbol": live_symbol, "fetch_symbol": fetch_symbol,
+        "start": start.isoformat(), "end": end.isoformat(),
+    })
+
+
+def _parse_futures_candle(c: dict):
+    ts = int(c["time"]) // 1000
+    return ts, {
+        "timestamp": ts,
+        "open": float(c["open"]),
+        "high": float(c["high"]),
+        "low": float(c["low"]),
+        "close": float(c["close"]),
+        "volume": float(c.get("volume", 0.0)),
+    }
+
+
+def _merge_candles_into_csv(live_symbol: str, raw_candles: list) -> int:
+    """Merge freshly-fetched Kraken futures candles into a symbol's existing CSV."""
+    outfile = os.path.join(OUTPUT_DIR, f"{live_symbol}_1min.csv")
+    existing = {}
+    if os.path.exists(outfile):
+        with open(outfile, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    existing[int(row["timestamp"])] = row
+                except (KeyError, ValueError):
+                    continue
+    added = 0
+    for c in raw_candles:
+        try:
+            ts, row = _parse_futures_candle(c)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if ts not in existing:
+            existing[ts] = row
+            added += 1
+    ordered = [existing[ts] for ts in sorted(existing)]
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    with open(outfile, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["timestamp", "open", "high", "low", "close", "volume"])
+        writer.writeheader()
+        writer.writerows(ordered)
+    return added
+
+
+def _load_existing_timestamps(outfile: str) -> list:
+    if not os.path.exists(outfile):
+        return []
+    ts_list = []
+    with open(outfile, "r") as f:
+        reader = csv.reader(f)
+        next(reader, None)
+        for row in reader:
+            try:
+                ts_list.append(int(row[0]))
+            except (IndexError, ValueError):
+                continue
+    ts_list.sort()
+    return ts_list
+
+
+def _max_interior_gap_minutes(sorted_ts: list) -> float:
+    if len(sorted_ts) < 2:
+        return 0.0
+    return max((b - a) / 60.0 for a, b in zip(sorted_ts, sorted_ts[1:]))
+
+
 def download_symbol(live_symbol: str, fetch_symbol: str, months: int = MONTHS) -> dict:
     """Download N months of 1-min futures candles for one symbol, resumable.
 
@@ -135,40 +229,44 @@ def download_symbol(live_symbol: str, fetch_symbol: str, months: int = MONTHS) -
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     outfile = os.path.join(OUTPUT_DIR, f"{live_symbol}_1min.csv")
 
-    existing_rows = 0
-    earliest_existing = None
-    if os.path.exists(outfile):
-        with open(outfile, "r") as f:
-            reader = csv.reader(f)
-            next(reader, None)
-            rows = list(reader)
-            existing_rows = len(rows)
-            if rows:
-                try:
-                    earliest_existing = datetime.fromtimestamp(int(rows[0][0]), tz=timezone.utc)
-                except Exception:
-                    earliest_existing = None
-        if existing_rows > 0:
-            print(f"  {live_symbol}: Found {existing_rows:,} existing rows, earliest: {earliest_existing}")
+    existing_ts = _load_existing_timestamps(outfile)
+    existing_rows = len(existing_ts)
+    earliest_existing = datetime.fromtimestamp(existing_ts[0], tz=timezone.utc) if existing_ts else None
+    if existing_rows > 0:
+        print(f"  {live_symbol}: Found {existing_rows:,} existing rows, earliest: {earliest_existing}")
 
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=months * 30)
+    full_expected = int((end - start).total_seconds() / 60)
+
+    if existing_ts:
+        max_gap = _max_interior_gap_minutes(existing_ts)
+        coverage = existing_rows / full_expected if full_expected else 0.0
+        if coverage >= MIN_COVERAGE and max_gap <= MAX_INTERIOR_GAP_MIN:
+            print(f"  {live_symbol}: Already complete ({existing_rows:,}/{full_expected:,} rows, "
+                  f"{coverage:.1%} coverage, max interior gap {max_gap:.0f}min)")
+            return _summarize(outfile, existing_rows, fetch_symbol)
+        print(f"  {live_symbol}: existing data incomplete ({existing_rows:,}/{full_expected:,} rows, "
+              f"{coverage:.1%} coverage, max interior gap {max_gap:.0f}min) -- resuming")
 
     if earliest_existing and earliest_existing < end:
         end_download = earliest_existing - timedelta(minutes=1)
-        if end_download <= start:
-            print(f"  {live_symbol}: Already complete ({existing_rows:,} rows)")
-            return _summarize(outfile, existing_rows, fetch_symbol)
     else:
         end_download = end
+
+    if end_download <= start:
+        # Existing data already spans the full 6-month window; any shortfall is an
+        # interior gap, which the backward-resume loop below can't reach -- leave it
+        # for tools/repair_gaps.py's surgical gap-fill pass.
+        return _summarize(outfile, existing_rows, fetch_symbol)
 
     chunk_duration = timedelta(minutes=CHUNK_MINUTES)
     all_candles = []
     current_end = end_download
-    total_expected = int((end_download - start).total_seconds() / 60)
+    pass_expected = int((end_download - start).total_seconds() / 60)
     fetched = 0
 
-    print(f"  {live_symbol}: Downloading {total_expected:,} expected candles via {fetch_symbol} ({start.date()} to {end_download.date()})...")
+    print(f"  {live_symbol}: Downloading {pass_expected:,} expected candles via {fetch_symbol} ({start.date()} to {end_download.date()})...")
 
     while current_end > start:
         current_start = max(start, current_end - chunk_duration)
@@ -178,9 +276,11 @@ def download_symbol(live_symbol: str, fetch_symbol: str, months: int = MONTHS) -
         if candles:
             all_candles.extend(candles)
             fetched += len(candles)
-            pct = min(100, (fetched / max(total_expected, 1)) * 100)
+            pct = min(100, (fetched / max(pass_expected, 1)) * 100)
             sys.stdout.write(f"\r  {live_symbol}: {fetched:,} candles ({pct:.0f}%)   ")
             sys.stdout.flush()
+        else:
+            _record_failed_chunk(live_symbol, fetch_symbol, current_start, current_end)
 
         current_end = current_start
         time.sleep(RATE_LIMIT_SEC)
@@ -196,19 +296,12 @@ def download_symbol(live_symbol: str, fetch_symbol: str, months: int = MONTHS) -
     clean = []
     for c in all_candles:
         try:
-            ts = int(c["time"]) // 1000
+            ts, row = _parse_futures_candle(c)
         except (KeyError, TypeError, ValueError):
             continue
         if ts not in seen:
             seen.add(ts)
-            clean.append({
-                "timestamp": ts,
-                "open": float(c["open"]),
-                "high": float(c["high"]),
-                "low": float(c["low"]),
-                "close": float(c["close"]),
-                "volume": float(c.get("volume", 0.0)),
-            })
+            clean.append(row)
 
     clean.sort(key=lambda x: x["timestamp"])
 
@@ -255,6 +348,44 @@ def _summarize(outfile: str, rows: int, fetch_symbol: str) -> dict:
     }
 
 
+def _retry_failed_chunks():
+    """One final retry pass over every chunk recorded as failed during the main run."""
+    if not FAILED_CHUNKS:
+        if os.path.exists(FAILED_CHUNKS_PATH):
+            os.remove(FAILED_CHUNKS_PATH)
+        return
+
+    print("\n" + "=" * 60)
+    print(f"RETRYING {len(FAILED_CHUNKS)} FAILED CHUNKS (final pass)")
+    print("=" * 60)
+    still_failed = []
+    for entry in FAILED_CHUNKS:
+        live_symbol = entry["live_symbol"]
+        fetch_symbol = entry["fetch_symbol"]
+        start = datetime.fromisoformat(entry["start"])
+        end = datetime.fromisoformat(entry["end"])
+        candles = fetch_candles(fetch_symbol, start, end)
+        if candles:
+            added = _merge_candles_into_csv(live_symbol, candles)
+            print(f"  Recovered {live_symbol} {start.isoformat()} -> {end.isoformat()} ({added} new rows)")
+        else:
+            still_failed.append(entry)
+            print(f"  STILL FAILING: {live_symbol} {start.isoformat()} -> {end.isoformat()}")
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    with open(FAILED_CHUNKS_PATH, "w") as f:
+        json.dump(still_failed, f, indent=2)
+
+    if still_failed:
+        print(f"\nWARNING: {len(still_failed)} chunks still unrecoverable after retry -- see "
+              f"{FAILED_CHUNKS_PATH}. These likely reflect genuine exchange-side gaps "
+              "(no trade printed that minute), not fetch failures.")
+    else:
+        print("\nAll failed chunks recovered on retry.")
+        if os.path.exists(FAILED_CHUNKS_PATH):
+            os.remove(FAILED_CHUNKS_PATH)
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print(f"DOWNLOADING {MONTHS}-MONTH 1-MIN KRAKEN FUTURES CANDLES")
@@ -274,6 +405,8 @@ if __name__ == "__main__":
         manifest[live_symbol] = summary
         total += summary["rows"]
         print()
+
+    _retry_failed_chunks()
 
     manifest_path = os.path.join(OUTPUT_DIR, "_symbol_sources.json")
     with open(manifest_path, "w") as f:
