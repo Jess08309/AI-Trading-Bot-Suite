@@ -19,16 +19,6 @@ run with SIM_REALISM_PROFILE=strict for the most conservative (worst-case)
 execution-cost assumptions (higher slippage, partial fills, funding costs,
 higher fees).
 
-NOTE ON MODEL DISCLOSURE: --model / DEFAULT_MODEL_PATH here loads a
-MarketPredictor model via config.ML_MODEL_PATH (data/models/market_model.joblib
-by default). The LIVE trading bot (cryptotrades/core/trading_engine.py's
-TradingEngine) loads a DIFFERENT artifact by default (models/trading_model.joblib,
-via a different model-loading code path) and continuously self-retrains it on a
-schedule -- the two are not the same model/pipeline. The persisted report below
-records model_path + model_mtime for whichever artifact THIS script actually
-loaded, precisely so this discrepancy can be checked/flagged rather than
-silently assumed away when interpreting gate results.
-
 Usage:
     cd CryptoBot
     SIM_REALISM_PROFILE=strict python3 backtest/run_baseline.py
@@ -91,6 +81,17 @@ def load_price_dir(directory: str, suffix: str = "_1min.csv") -> Dict[str, List[
         data[symbol] = prices
         print(f"  {symbol}: loaded {len(prices):,} candles")
     return data
+
+
+def load_coverage(directory: str) -> Dict[str, dict]:
+    """Read tools/repair_gaps.py's gap_report.json (if present) for per-symbol
+    post-repair coverage %, so the gate report can show data quality alongside
+    trading results instead of silently assuming full coverage."""
+    path = os.path.join(directory, "gap_report.json")
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r") as f:
+        return json.load(f)
 
 
 def split_futures_by_direction(results: Dict[str, BacktestResult]) -> Dict[str, dict]:
@@ -157,6 +158,14 @@ def main():
                          help="Path to trained MarketPredictor model (.joblib)")
     parser.add_argument("--candle-size", type=int, default=10,
                          help="Minutes per decision candle (default 10, matches live TRADE_INTERVAL)")
+    parser.add_argument("--output", default=REPORT_PATH,
+                         help="Where to write the JSON report (default data/state/baseline_report.json). "
+                              "Use a distinct path per run when comparing multiple models (e.g. frozen "
+                              "gate model vs live trading_model.joblib) so reports don't overwrite each other.")
+    parser.add_argument("--model-meta", default=None,
+                         help="Path to a tools/retrain_on_6mo.py --meta-output JSON describing this "
+                              "model's training window. Omit for models with no known/recorded training "
+                              "window (e.g. the live continuously-retrained artifact).")
     args = parser.parse_args()
 
     print(f"SIM_REALISM_PROFILE = {live_config.SIM_REALISM_PROFILE}")
@@ -199,14 +208,34 @@ def main():
     print_long_vs_short(long_short_buckets)
 
     # Persist full report for later reference / PR writeup.
-    os.makedirs(os.path.dirname(REPORT_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(args.output), exist_ok=True)
     model_mtime = os.path.getmtime(args.model) if os.path.exists(args.model) else None
+
+    model_training_window = None
+    if args.model_meta and os.path.exists(args.model_meta):
+        with open(args.model_meta, "r") as f:
+            model_training_window = json.load(f)
+    model_training_window_note = (
+        None if model_training_window else
+        "No --model-meta supplied: training window for this model artifact is unknown/undocumented "
+        "(e.g. the live bot's continuously-retrained trading_model.joblib, which retrains on a rolling "
+        "~28h in-memory price buffer every MODEL_RETRAIN_HOURS -- see PR writeup for leakage discussion)."
+    )
+
+    coverage = {
+        "spot": load_coverage(SPOT_DIR),
+        "futures": load_coverage(FUTURES_DIR),
+    }
+
     report = {
         "sim_realism_profile": live_config.SIM_REALISM_PROFILE,
         "model_path": args.model,
         "model_mtime": (
             datetime.fromtimestamp(model_mtime, tz=timezone.utc).isoformat() if model_mtime else None
         ),
+        "model_training_window": model_training_window,
+        "model_training_window_note": model_training_window_note,
+        "data_coverage": coverage,
         "candle_size": args.candle_size,
         "per_symbol": {
             key: {
@@ -226,9 +255,9 @@ def main():
             for direction, b in long_short_buckets.items()
         },
     }
-    with open(REPORT_PATH, "w") as f:
+    with open(args.output, "w") as f:
         json.dump(report, f, indent=2)
-    print(f"\nFull report written to {REPORT_PATH}")
+    print(f"\nFull report written to {args.output}")
 
 
 if __name__ == "__main__":
