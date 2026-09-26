@@ -40,6 +40,10 @@ class CallBuyerConfig:
     MAX_POSITIONS: int = 4                   # max concurrent calls (concentrate capital)
     MAX_PER_UNDERLYING: int = 2              # max 2 calls per stock
 
+    # Owner-controlled kill-switch — blocks NEW entries only; exits/risk
+    # management keep running for any already-open positions.
+    ENTRIES_PAUSED: bool = _env("ENTRIES_PAUSED", False, bool)
+
     # ── Strategy: Buy ITM Calls on Momentum Breakout ────
     # DTE targeting — enough time for move, avoid theta crush
     MIN_DTE: int = 21                        # minimum days to expiration
@@ -176,6 +180,7 @@ class CallBuyerConfig:
             f"  ML: {'ON' if self.ML_ENABLED else 'OFF'} | weight {self.ML_WEIGHT:.0%}\n"
             f"  Exit: TP {self.TAKE_PROFIT_PCT:.0%} | SL {self.STOP_LOSS_PCT:.0%} | DTE {self.MIN_DTE_EXIT}\n"
             f"  Max positions: {self.MAX_POSITIONS}\n"
+            f"  Entries paused: {self.ENTRIES_PAUSED}\n"
             f"  API Keys: {'SET' if self.has_keys else 'MISSING'}"
         )
 
