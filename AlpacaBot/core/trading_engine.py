@@ -1486,51 +1486,87 @@ class ScalpTradingEngine:
 
         order_id = self.api.submit_mleg_order(legs, qty=qty, limit_price=limit_debit)
 
-        if order_id:
-            with self._lock:
-                self.positions[long_leg["symbol"]] = {
-                    "underlying": underlying,
-                    "symbol": long_leg["symbol"],
-                    "direction": direction,
-                    "option_type": long_leg.get("type", direction),
-                    "strike": long_leg.get("strike", 0),
-                    "expiration": spread["expiration"],
-                    "entry_price": long_leg.get("ask", 0),
-                    "current_price": long_mid,
-                    "peak_price": long_mid,
-                    "qty": qty,
-                    "cost": total_cost,
-                    "order_id": order_id,
-                    "entry_time": datetime.now().isoformat(),
-                    "score": signal["score"],
-                    # Spread-specific
-                    "strategy": "spread",
-                    "strategy_name": strategy_name,
-                    "short_leg_symbol": short_leg["symbol"],
-                    "short_leg_strike": short_leg.get("strike", 0),
-                    "short_leg_entry_price": short_leg.get("bid", 0),
-                    "net_debit": limit_debit,
-                    "spread_width": spread["spread_width"],
-                    "max_profit": spread["max_profit_per_contract"],
-                    "max_loss": spread["max_loss_per_contract"],
-                    "peak_spread_value": limit_debit,
-                    # AI context
-                    "ml_confidence": signal.get("ml_confidence", 0.5),
-                    "ml_direction": signal.get("ml_direction", 0.5),
-                    "sentiment": signal.get("sentiment", 0.0),
-                    "ensemble_score": signal.get("ensemble_score", 0.5),
-                    "reason_entry": signal.get("reason", ""),
-                }
-            self.trades_today += 1
-            self._log_activity(
-                f"OPENED SPREAD: {long_leg['symbol']}/{short_leg['symbol']} "
-                f"| {strategy_name} K=${long_leg['strike']}/{short_leg['strike']} "
-                f"| debit ${limit_debit:.2f} x {qty} = ${total_cost:.0f}"
-            )
-            return True
-        else:
+        if not order_id:
             self._log_activity(f"SPREAD ORDER FAILED for {underlying}", "error")
             return False
+
+        # Verify the order actually FILLED before tracking it as an open
+        # position. A day-limit mleg order can sit unfilled for hours and
+        # expire worthless; previously we tracked it as "open" the moment
+        # Alpaca *accepted* the order, which created phantom positions that
+        # never existed at the broker. Closing a phantom position later
+        # produced a fabricated, impossibly large loss (see NFLX 2026-09-24:
+        # order b08b025c never filled, expired at 20:00 UTC, yet the bot
+        # "closed" it the next day for -$6,039 / -230% of debit).
+        confirmed_filled = False
+        filled_debit = limit_debit
+        for _ in range(6):
+            self._sleep(5)
+            order_status = self.api.get_order(order_id)
+            if not order_status:
+                continue
+            status = order_status.get("status")
+            if status == "filled":
+                confirmed_filled = True
+                filled_avg = order_status.get("filled_avg_price")
+                if filled_avg:
+                    filled_debit = float(filled_avg)
+                break
+            if status in ("canceled", "expired", "rejected", "done_for_day"):
+                break
+
+        if not confirmed_filled:
+            self.api.cancel_order(order_id)
+            self._log_activity(
+                f"SPREAD ORDER NOT FILLED for {underlying} "
+                f"({long_leg['symbol']}/{short_leg['symbol']}) — cancelled, "
+                f"no position opened",
+                "warning"
+            )
+            return False
+
+        total_cost = filled_debit * 100 * qty
+        with self._lock:
+            self.positions[long_leg["symbol"]] = {
+                "underlying": underlying,
+                "symbol": long_leg["symbol"],
+                "direction": direction,
+                "option_type": long_leg.get("type", direction),
+                "strike": long_leg.get("strike", 0),
+                "expiration": spread["expiration"],
+                "entry_price": long_leg.get("ask", 0),
+                "current_price": long_mid,
+                "peak_price": long_mid,
+                "qty": qty,
+                "cost": total_cost,
+                "order_id": order_id,
+                "entry_time": datetime.now().isoformat(),
+                "score": signal["score"],
+                # Spread-specific
+                "strategy": "spread",
+                "strategy_name": strategy_name,
+                "short_leg_symbol": short_leg["symbol"],
+                "short_leg_strike": short_leg.get("strike", 0),
+                "short_leg_entry_price": short_leg.get("bid", 0),
+                "net_debit": filled_debit,
+                "spread_width": spread["spread_width"],
+                "max_profit": spread["max_profit_per_contract"],
+                "max_loss": spread["max_loss_per_contract"],
+                "peak_spread_value": filled_debit,
+                # AI context
+                "ml_confidence": signal.get("ml_confidence", 0.5),
+                "ml_direction": signal.get("ml_direction", 0.5),
+                "sentiment": signal.get("sentiment", 0.0),
+                "ensemble_score": signal.get("ensemble_score", 0.5),
+                "reason_entry": signal.get("reason", ""),
+            }
+        self.trades_today += 1
+        self._log_activity(
+            f"OPENED SPREAD: {long_leg['symbol']}/{short_leg['symbol']} "
+            f"| {strategy_name} K=${long_leg['strike']}/{short_leg['strike']} "
+            f"| debit ${filled_debit:.2f} x {qty} = ${total_cost:.0f}"
+        )
+        return True
 
     # ==========================================================
     #  EXIT MANAGEMENT
@@ -1789,6 +1825,13 @@ class ScalpTradingEngine:
         if is_spread:
             entry_debit = pos.get("net_debit", 0)
             exit_value = pos.get("current_spread_value", entry_debit)
+            spread_width = pos.get("spread_width", 0)
+            if spread_width > 0:
+                # A vertical spread's value can never fall below $0 or rise
+                # above the strike width — clamp defensively so a stale/bad
+                # quote (or a phantom "not found on Alpaca" close) can never
+                # be logged as an impossible loss beyond the debit paid.
+                exit_value = max(0.0, min(exit_value, spread_width))
             pnl = (exit_value - entry_debit) * 100 * qty
             pnl_pct = (exit_value - entry_debit) / entry_debit if entry_debit > 0 else 0
             max_prof = pos.get("max_profit", 0)
