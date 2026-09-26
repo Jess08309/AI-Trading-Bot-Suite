@@ -83,6 +83,21 @@ class TestPortfolioReportReconciliation(unittest.TestCase):
         self.assertIn("AAPL260101C00200000", phantoms[0])
         self.assertEqual(orphans, [])
 
+    def test_putseller_malformed_entry_is_skipped_gracefully(self):
+        broker_positions = [
+            {"symbol": "SPY260101P00590000", "qty": "-1"},
+        ]
+        bot_positions = {
+            "PutSeller": {
+                "bad_entry": "not-a-dict",
+            }
+        }
+
+        phantoms, orphans = portfolio_report._reconcile(bot_positions, broker_positions)
+
+        self.assertEqual(phantoms, [])
+        self.assertEqual(orphans, ["ORPHAN ALERT: broker position SPY260101P00590000 is not claimed by any bot"])
+
 
 if __name__ == "__main__":
     unittest.main()

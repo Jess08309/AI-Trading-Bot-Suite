@@ -342,6 +342,8 @@ def _reconcile_local_positions(spec: BotSpec,
     if spec.name == "PutSeller":
         claimed_symbols: Set[str] = set()
         for spread_id, pos in positions.items():
+            if not isinstance(pos, dict):
+                continue
             legs = [pos.get("short_symbol", ""), pos.get("long_symbol", "")]
             claimed_symbols.update(leg for leg in legs if leg)
             alert = _reconcile_position(
