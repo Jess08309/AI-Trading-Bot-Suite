@@ -147,7 +147,10 @@ BOT_SPECS: List[BotSpec] = [
             "pnl_dollar", "timestamp", _extract_callbuyer_claims),
     BotSpec("PutSeller", "PutSeller", "data/trades.csv", "data/state/positions.json",
             "pnl", "timestamp", _extract_putseller_claims),
-    BotSpec("CryptoBot", "CryptoBot", "data/trades.csv", "data/state/positions.json",
+    # NOTE: CryptoBot's package root (cryptotrades/) nests its own data/
+    # dir one level deeper than the other 3 bots — trading_engine.py
+    # resolves state paths relative to cryptotrades/, not CryptoBot/.
+    BotSpec("CryptoBot", "CryptoBot", "data/trades.csv", "cryptotrades/data/state/positions.json",
             "pnl_usd", "timestamp", _extract_cryptobot_claims),
 ]
 
