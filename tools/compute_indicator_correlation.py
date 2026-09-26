@@ -21,7 +21,9 @@ Data source (in priority order):
                                trailing ~6 months, using
                                ALPACA_API_KEY / ALPACA_API_SECRET from the
                                environment ONLY (never printed), matching
-                               the convention used across this repo.
+                               the convention used across this repo. Uses
+                               the IEX feed — most paper/free-tier Alpaca
+                               subscriptions cannot query recent SIP data.
 
 If neither source is available (no local file and no network/credentials
 for the Alpaca API — e.g. when running in a sandboxed/offline
@@ -81,6 +83,7 @@ def _load_from_alpaca(months: int = 6) -> np.ndarray:
     from alpaca.data.historical import StockHistoricalDataClient
     from alpaca.data.requests import StockBarsRequest
     from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+    from alpaca.data.enums import DataFeed
 
     client = StockHistoricalDataClient(api_key, api_secret)
     end = datetime.now()
@@ -99,6 +102,10 @@ def _load_from_alpaca(months: int = 6) -> np.ndarray:
             timeframe=TimeFrame(10, TimeFrameUnit.Minute),
             start=chunk_start,
             end=chunk_end,
+            # Most paper/free-tier accounts can't query recent SIP data;
+            # IEX is available on every plan and is good enough for a
+            # feature-correlation analysis (not used for live trading decisions).
+            feed=DataFeed.IEX,
         )
         bars = client.get_stock_bars(req)
         for b in bars.data.get("SPY", []):
