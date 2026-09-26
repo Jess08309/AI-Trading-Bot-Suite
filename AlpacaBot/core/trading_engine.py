@@ -1197,7 +1197,6 @@ class ScalpTradingEngine:
                 ml_pred = {"direction": 0.5, "confidence": 0.5, "up_prob": 0.5, "down_prob": 0.5}
                 if chunk is not None and self.ml_ready and self.ml_model.model is not None:
                     ml_pred = self.ml_model.predict(chunk)
-
                 ml_conf = ml_pred["confidence"]
                 ml_direction = ml_pred["direction"]
                 ml_agrees = (
@@ -1587,8 +1586,18 @@ class ScalpTradingEngine:
                 try:
                     lq = self.api.get_option_quote(sym)
                     sq = self.api.get_option_quote(pos["short_leg_symbol"])
-                    if lq and sq and lq.get("mid", 0) > 0:
+                    if lq and sq and lq.get("mid", 0) > 0 and sq.get("mid", 0) > 0:
                         net_val = lq["mid"] - sq["mid"]
+                        # A debit spread's value is economically bounded between
+                        # $0 and the spread width; noisy/stale indicative quotes
+                        # (especially on the short, less-liquid leg) can otherwise
+                        # push net_val far outside that range and falsely trigger
+                        # a stop loss far beyond the actual debit at risk.
+                        spread_width = pos.get("spread_width", 0)
+                        if spread_width > 0:
+                            net_val = max(0.0, min(net_val, spread_width))
+                        else:
+                            net_val = max(0.0, net_val)
                         with self._lock:
                             pos["current_price"] = lq["mid"]
                             pos["current_spread_value"] = net_val
