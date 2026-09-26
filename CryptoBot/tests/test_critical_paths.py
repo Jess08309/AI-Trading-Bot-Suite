@@ -4,6 +4,7 @@ Tests for: risk limits, ML model predictions, feature computation, regime detect
 All external dependencies are mocked — no real API calls or file I/O.
 """
 import unittest
+from datetime import datetime
 from unittest.mock import patch, MagicMock, PropertyMock
 import numpy as np
 import sys
@@ -347,6 +348,109 @@ class TestRegimeDetector(unittest.TestCase):
         adj = result["suggested_adjustments"]
         # Should be CryptoBot-specific (has long_bias key)
         self.assertIn("long_bias", adj)
+
+
+class TestFillConfirmation(unittest.TestCase):
+    """Tests for the Alpaca spot fill-confirmation fix (fix/cryptobot-fill-confirmation):
+    zero/partial fills must never be silently treated as a confirmed position change.
+    """
+
+    def _make_bot(self, **overrides):
+        """Build a TradingBot instance bypassing __init__, with only the
+        attributes needed by the methods under test set on it."""
+        from cryptotrades.core.trading_engine import TradingBot
+        bot = TradingBot.__new__(TradingBot)
+        bot.logger = MagicMock()
+        bot.trading_client = overrides.pop("trading_client", MagicMock())
+        bot.positions = overrides.pop("positions", {})
+        bot.balance_spot = overrides.pop("balance_spot", 5000.0)
+        bot.balance_futures = overrides.pop("balance_futures", 5000.0)
+        bot.risk_manager = MagicMock()
+        bot.advisor = None
+        bot._save_state = MagicMock()
+        bot._log_trade_csv = MagicMock()
+        bot._record_symbol_result = MagicMock()
+        bot._record_direction_result = MagicMock()
+        bot._apply_slippage = MagicMock(side_effect=lambda price, direction, is_entry, is_futures: price)
+        for key, value in overrides.items():
+            setattr(bot, key, value)
+        return bot
+
+    def _make_position(self, broker_qty=2.0):
+        from cryptotrades.core.trading_engine import Position
+        return Position(
+            symbol="AAVE/USD",
+            direction="LONG",
+            entry_price=100.0,
+            size=200.0,
+            entry_time=datetime.now(),
+            stop_loss=95.0,
+            take_profit=105.0,
+            max_price=100.0,
+            broker_qty=broker_qty,
+        )
+
+    def test_buy_zero_fill_returns_zero_and_cancels(self):
+        """An order that never confirms a fill must return 0.0, never a phantom qty."""
+        order = MagicMock(id="order-1", filled_qty=None)
+        bot = self._make_bot()
+        bot.trading_client.submit_order.return_value = order
+        bot.trading_client.get_order_by_id.return_value = order
+
+        with patch("cryptotrades.core.trading_engine.time.sleep"):
+            result = bot._alpaca_buy_spot("BTC/USD", 100.0)
+
+        self.assertEqual(result, 0.0)
+        bot.trading_client.cancel_order_by_id.assert_called_once_with("order-1")
+
+    def test_buy_confirmed_fill_returns_qty(self):
+        """A confirmed fill must return the real filled qty."""
+        order = MagicMock(id="order-2", filled_qty="1.5")
+        bot = self._make_bot()
+        bot.trading_client.submit_order.return_value = order
+        bot.trading_client.get_order_by_id.return_value = order
+
+        with patch("cryptotrades.core.trading_engine.time.sleep"):
+            result = bot._alpaca_buy_spot("BTC/USD", 100.0)
+
+        self.assertEqual(result, 1.5)
+        bot.trading_client.cancel_order_by_id.assert_not_called()
+
+    def test_sell_zero_fill_keeps_position_tracked(self):
+        """A sell that doesn't confirm any fill must NOT delete local state."""
+        position = self._make_position(broker_qty=2.0)
+        bot = self._make_bot(positions={"AAVE/USD": position})
+        bot._alpaca_sell_spot = MagicMock(return_value=0.0)
+
+        bot._close_position("AAVE/USD", 100.0, "STOP_LOSS", 0.0)
+
+        self.assertIn("AAVE/USD", bot.positions)
+        self.assertEqual(bot.positions["AAVE/USD"].broker_qty, 2.0)
+        bot._save_state.assert_not_called()
+
+    def test_sell_partial_fill_keeps_position_with_corrected_qty(self):
+        """A partial sell must retain the position with the remaining qty, not drop state."""
+        position = self._make_position(broker_qty=2.0)
+        bot = self._make_bot(positions={"AAVE/USD": position})
+        bot._alpaca_sell_spot = MagicMock(return_value=1.2)
+
+        bot._close_position("AAVE/USD", 100.0, "STOP_LOSS", 0.0)
+
+        self.assertIn("AAVE/USD", bot.positions)
+        self.assertAlmostEqual(bot.positions["AAVE/USD"].broker_qty, 0.8)
+        bot._save_state.assert_called_once()
+
+    def test_sell_full_fill_closes_position(self):
+        """A fully-confirmed sell must proceed with the normal close/delete path."""
+        position = self._make_position(broker_qty=2.0)
+        bot = self._make_bot(positions={"AAVE/USD": position})
+        bot._alpaca_sell_spot = MagicMock(return_value=2.0)
+
+        bot._close_position("AAVE/USD", 105.0, "TAKE_PROFIT", 5.0)
+
+        self.assertNotIn("AAVE/USD", bot.positions)
+        bot._save_state.assert_called_once()
+        bot.risk_manager.record_trade.assert_called_once()
 
 
 if __name__ == '__main__':

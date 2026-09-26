@@ -115,6 +115,8 @@ def _extract_cryptobot_claims(positions: Dict[str, Any]) -> List[PositionClaim]:
         raw = pos.get("symbol") or key
         if not raw:
             continue
+        if raw.startswith("PI_"):
+            continue  # futures leg disabled per owner Alpaca-only directive; legacy simulated keys
         # Alpaca crypto symbols are unslashed (e.g. "BTCUSD"); local state
         # uses the "BTC/USD" convention — normalize for comparison.
         claims.append(PositionClaim(position_id=key, legs=[raw.replace("/", "")]))
