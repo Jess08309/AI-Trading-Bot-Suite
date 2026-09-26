@@ -52,8 +52,18 @@ RULE_MAX_DRAWDOWN_PCT = 10.0
 
 
 def _extract_alpacabot_symbols(positions: Dict[str, Any]) -> Set[str]:
-    # Keyed by the OCC option symbol itself.
-    return {sym for sym in positions.keys() if sym}
+    out = set()
+    for keyed_symbol, pos in positions.items():
+        if keyed_symbol:
+            out.add(keyed_symbol)
+        if isinstance(pos, dict):
+            primary_symbol = pos.get("symbol")
+            short_leg_symbol = pos.get("short_leg_symbol")
+            if primary_symbol:
+                out.add(primary_symbol)
+            if short_leg_symbol:
+                out.add(short_leg_symbol)
+    return out
 
 
 def _extract_callbuyer_symbols(positions: Dict[str, Any]) -> Set[str]:
@@ -276,7 +286,109 @@ def _fetch_broker_positions() -> Tuple[Optional[List[Dict[str, Any]]], str]:
     return out, "ok"
 
 
-def _reconcile(bot_symbol_sets: Dict[str, Set[str]],
+def _has_nonzero_qty(position: Dict[str, Any]) -> bool:
+    qty = position.get("qty")
+    try:
+        return float(qty) != 0.0
+    except (TypeError, ValueError):
+        return qty not in (None, "", 0, "0")
+
+
+def _broker_symbol_set(broker_positions: List[Dict[str, Any]]) -> Set[str]:
+    return {
+        p["symbol"]
+        for p in broker_positions
+        if p.get("symbol") and _has_nonzero_qty(p)
+    }
+
+
+def _phantom_alert_for_legs(bot: str,
+                            position_label: str,
+                            expected_legs: List[str],
+                            missing_legs: List[str]) -> str:
+    if len(expected_legs) == 1:
+        return (
+            f"PHANTOM ALERT (bot {bot}): {position_label} tracked locally but NOT found at broker"
+        )
+
+    if len(missing_legs) == 1:
+        return (
+            f"PHANTOM ALERT (bot {bot}): {position_label} spread missing broker leg "
+            f"{missing_legs[0]} (other leg still present)"
+        )
+
+    return (
+        f"PHANTOM ALERT (bot {bot}): {position_label} spread tracked locally but "
+        "neither leg was found at broker"
+    )
+
+
+def _reconcile_position(bot: str,
+                        position_label: str,
+                        expected_legs: List[str],
+                        broker_symbols: Set[str]) -> Optional[str]:
+    normalized_legs = [leg for leg in expected_legs if leg]
+    missing_legs = [leg for leg in normalized_legs if leg not in broker_symbols]
+    if not missing_legs:
+        return None
+    return _phantom_alert_for_legs(bot, position_label, normalized_legs, missing_legs)
+
+
+def _reconcile_local_positions(spec: BotSpec,
+                               positions: Dict[str, Any],
+                               broker_symbols: Set[str]) -> Tuple[Set[str], List[str]]:
+    phantoms: List[str] = []
+
+    if spec.name == "PutSeller":
+        claimed_symbols: Set[str] = set()
+        for spread_id, pos in positions.items():
+            if not isinstance(pos, dict):
+                continue
+            legs = [pos.get("short_symbol", ""), pos.get("long_symbol", "")]
+            claimed_symbols.update(leg for leg in legs if leg)
+            alert = _reconcile_position(
+                spec.name,
+                spread_id,
+                legs,
+                broker_symbols,
+            )
+            if alert:
+                phantoms.append(alert)
+        return claimed_symbols, phantoms
+
+    if spec.name == "AlpacaBot":
+        claimed_symbols: Set[str] = set()
+        for keyed_symbol, pos in positions.items():
+            if not isinstance(pos, dict):
+                if keyed_symbol:
+                    claimed_symbols.add(keyed_symbol)
+                alert = _reconcile_position(spec.name, keyed_symbol, [keyed_symbol], broker_symbols)
+                if alert:
+                    phantoms.append(alert)
+                continue
+
+            primary_symbol = pos.get("symbol") or keyed_symbol
+            legs = [primary_symbol, pos.get("short_leg_symbol", "")]
+            claimed_symbols.update(leg for leg in legs if leg)
+            alert = _reconcile_position(
+                spec.name,
+                primary_symbol,
+                legs,
+                broker_symbols,
+            )
+            if alert:
+                phantoms.append(alert)
+        return claimed_symbols, phantoms
+
+    claimed_symbols = spec.symbol_extractor(positions)
+    for sym in sorted(claimed_symbols):
+        alert = _reconcile_position(spec.name, sym, [sym], broker_symbols)
+        if alert:
+            phantoms.append(alert)
+    return claimed_symbols, phantoms
+
+
+def _reconcile(bot_positions: Dict[str, Dict[str, Any]],
                broker_positions: Optional[List[Dict[str, Any]]]
                ) -> Tuple[List[str], List[str]]:
     """Return (phantom_alerts, orphan_alerts)."""
@@ -285,12 +397,15 @@ def _reconcile(bot_symbol_sets: Dict[str, Set[str]],
     if broker_positions is None:
         return phantoms, orphans
 
-    broker_symbols = {p["symbol"] for p in broker_positions if p.get("symbol")}
+    broker_symbols = _broker_symbol_set(broker_positions)
     claimed_by_any: Set[str] = set()
-    for bot, symbols in bot_symbol_sets.items():
-        claimed_by_any |= symbols
-        for sym in sorted(symbols - broker_symbols):
-            phantoms.append(f"PHANTOM ALERT (bot {bot}): {sym} tracked locally but NOT found at broker")
+    for spec in BOT_SPECS:
+        positions = bot_positions.get(spec.name)
+        if positions is None:
+            continue
+        claimed_symbols, bot_phantoms = _reconcile_local_positions(spec, positions, broker_symbols)
+        claimed_by_any |= claimed_symbols
+        phantoms.extend(bot_phantoms)
 
     for sym in sorted(broker_symbols - claimed_by_any):
         orphans.append(f"ORPHAN ALERT: broker position {sym} is not claimed by any bot")
@@ -309,18 +424,18 @@ def build_report(bot_names: Optional[List[str]] = None) -> Dict[str, Any]:
     metrics_by_bot: Dict[str, BotMetrics] = {}
     verdicts_by_bot: Dict[str, Tuple[List[Tuple[str, bool, str]], bool]] = {}
     positions_notes: Dict[str, Optional[str]] = {}
-    bot_symbol_sets: Dict[str, Set[str]] = {}
+    bot_positions: Dict[str, Dict[str, Any]] = {}
 
     for spec in specs:
         m = _compute_metrics(spec)
         metrics_by_bot[spec.name] = m
         verdicts_by_bot[spec.name] = _rule_verdict(m)
-        _, symbols, note = _load_positions(spec)
-        bot_symbol_sets[spec.name] = symbols
+        data, _, note = _load_positions(spec)
+        bot_positions[spec.name] = data
         positions_notes[spec.name] = note
 
     broker_positions, broker_note = _fetch_broker_positions()
-    phantoms, orphans = _reconcile(bot_symbol_sets, broker_positions)
+    phantoms, orphans = _reconcile(bot_positions, broker_positions)
 
     return {
         "specs": specs,
