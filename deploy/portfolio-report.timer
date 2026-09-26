@@ -1,0 +1,15 @@
+[Unit]
+Description=Run the portfolio/governance report daily after US market close (Workstream F)
+
+[Timer]
+# 21:30 UTC = after the 20:00 UTC (4:00pm ET) US equities close, with a
+# buffer for after-hours settlement of the day's closed trades.
+OnCalendar=*-*-* 21:30:00 UTC
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
+
+# NOTE: this unit is included in the PR for review only. Do NOT install or
+# enable it until the owner approves — see PR description.

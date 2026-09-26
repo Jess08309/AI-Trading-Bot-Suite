@@ -1,0 +1,23 @@
+[Unit]
+Description=Portfolio/Governance Report — fleet-wide P&L + reconciliation (Workstream F)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=botuser
+Group=botuser
+WorkingDirectory=/home/botuser/AI-Trading-Bot-Suite
+# Alpaca credentials must be supplied via inline Environment= lines below
+# (this droplet's systemd units use inline Environment=, NOT
+# EnvironmentFile=) or already exported in the shell that manages this
+# unit. Never commit real values here.
+# Environment=ALPACA_API_KEY=REPLACE_ME
+# Environment=ALPACA_API_SECRET=REPLACE_ME
+ExecStart=/usr/bin/python3 /home/botuser/AI-Trading-Bot-Suite/tools/portfolio_report.py
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=portfolio-report
+
+# NOTE: this unit is included in the PR for review only. Do NOT install or
+# enable it until the owner approves — see PR description.

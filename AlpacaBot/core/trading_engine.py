@@ -53,6 +53,10 @@ from utils.meta_learner import MetaLearner
 
 log = logging.getLogger("alpacabot.engine")
 
+# Fleet-wide kill switch: if this file exists, no new entries are opened.
+# Checked at the top of every cycle (see Workstream F / GO_LIVE_CRITERIA.md).
+KILL_SWITCH_PATH = os.environ.get("KILL_ALL_PATH", "/home/botuser/KILL_ALL")
+
 
 class ScalpTradingEngine:
     """
@@ -334,6 +338,15 @@ class ScalpTradingEngine:
             try:
                 self.cycle += 1
 
+                # Fleet-wide kill switch: checked first, every cycle, before
+                # any blocking calls below. Presence of the file pauses new
+                # entries only; exits/monitoring continue normally.
+                kill_switch_active = os.path.exists(KILL_SWITCH_PATH)
+                if kill_switch_active:
+                    log.warning(
+                        f"KILL_ALL detected at {KILL_SWITCH_PATH} - new entries paused this cycle"
+                    )
+
                 # Market open check
                 if not self._is_market_open():
                     # Pre-market warmup: run once, ~30 min before open
@@ -372,7 +385,7 @@ class ScalpTradingEngine:
                 self._check_exits()
 
                 # Phase 3: Generate signals and open new positions
-                if self.cycle % self.config.SIGNAL_CHECK_BARS == 0:
+                if self.cycle % self.config.SIGNAL_CHECK_BARS == 0 and not kill_switch_active:
                     self._scan_and_trade()
 
                 # Phase 4: Housekeeping
