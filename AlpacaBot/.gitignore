@@ -28,6 +28,9 @@ data/historical/*.csv
 data/models/*.joblib
 data/models/*.pt
 data/state/
+data/monitor/
+data/shadow_trades.csv
+data/trades.csv
 
 # Temp
 *.tmp
