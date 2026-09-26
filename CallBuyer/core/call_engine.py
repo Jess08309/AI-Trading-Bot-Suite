@@ -1,4 +1,3 @@
-yj
 # RESCUED (Workstream D, 2026-09-25): found uncommitted at
 # CallBuyer/core/call_engine.py in the live droplet tree during the
 # PR #9/#11 post-merge git cleanup. Content never matched any commit in
