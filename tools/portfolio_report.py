@@ -13,9 +13,16 @@ CryptoBot):
     positions (data/state/positions.json) against the live Alpaca account
     (via the Alpaca API) to catch PHANTOM (bot thinks it holds a position
     the broker does not have) and ORPHAN (broker holds a position no bot
-    claims) conditions. Any phantom is surfaced in a CRITICAL section at
-    the very top of the output — this is the standing regression alarm
-    for the NFLX phantom-position bug class.
+    claims) conditions. Multi-leg positions (PutSeller credit spreads,
+    AlpacaBot vertical spreads) are checked leg-by-leg: if ALL legs are
+    missing at the broker the whole position is a PHANTOM, but if only
+    SOME legs are missing that's reported as a separate, more severe
+    ONE-LEG PHANTOM / naked-leg alert (the actually dangerous state — a
+    hedge the bot thinks exists no longer does). A broker row reporting
+    qty==0 (settlement lag) is treated as absent, not as a match and not
+    as an orphan. Any phantom/one-leg-phantom is surfaced in a CRITICAL
+    section at the very top of the output — this is the standing
+    regression alarm for the NFLX phantom-position bug class.
 
 Data sources are read-only; this tool never places orders or modifies any
 bot's trade/position state files.
@@ -51,36 +58,67 @@ RULE_MIN_WIN_RATE_PCT = 40.0
 RULE_MAX_DRAWDOWN_PCT = 10.0
 
 
-def _extract_alpacabot_symbols(positions: Dict[str, Any]) -> Set[str]:
-    # Keyed by the OCC option symbol itself.
-    return {sym for sym in positions.keys() if sym}
+@dataclass
+class PositionClaim:
+    """One locally-tracked position, expressed as the set of broker-side
+    symbols ("legs") that must ALL be present for the position to be
+    considered fully matched. Single-leg positions have exactly one leg;
+    multi-leg spreads (PutSeller credit spreads, AlpacaBot vertical
+    spreads) have two. This lets reconciliation distinguish "the whole
+    position is gone" (ordinary PHANTOM) from "only one leg is gone"
+    (a naked-leg CRITICAL condition — the actually dangerous state).
+    """
+    position_id: str
+    legs: List[str] = field(default_factory=list)
 
 
-def _extract_callbuyer_symbols(positions: Dict[str, Any]) -> Set[str]:
-    out = set()
-    for sym, pos in positions.items():
-        out.add(pos.get("contract") or sym)
-    return {s for s in out if s}
+def _extract_alpacabot_claims(positions: Dict[str, Any]) -> List[PositionClaim]:
+    claims = []
+    for key, pos in positions.items():
+        if not key:
+            continue
+        legs = [key]
+        # Vertical spreads are keyed by the long leg's symbol and also
+        # track the short leg separately (see trading_engine.py _execute_spread).
+        short_leg = pos.get("short_leg_symbol")
+        if pos.get("strategy") == "spread" and short_leg:
+            legs.append(short_leg)
+        claims.append(PositionClaim(position_id=key, legs=legs))
+    return claims
 
 
-def _extract_putseller_symbols(positions: Dict[str, Any]) -> Set[str]:
-    out = set()
-    for pos in positions.values():
-        for leg in ("short_symbol", "long_symbol"):
-            s = pos.get(leg)
-            if s:
-                out.add(s)
-    return out
+def _extract_callbuyer_claims(positions: Dict[str, Any]) -> List[PositionClaim]:
+    claims = []
+    for key, pos in positions.items():
+        # NOTE: `contract` is expected to already be in the same symbol
+        # format Alpaca returns (OCC option symbol) — verify this on the
+        # first real run against a live account; if CallBuyer stores a
+        # different format, add a normalization step here.
+        sym = pos.get("contract") or key
+        if sym:
+            claims.append(PositionClaim(position_id=key, legs=[sym]))
+    return claims
 
 
-def _extract_cryptobot_symbols(positions: Dict[str, Any]) -> Set[str]:
-    out = set()
-    for sym, pos in positions.items():
-        raw = pos.get("symbol") or sym
+def _extract_putseller_claims(positions: Dict[str, Any]) -> List[PositionClaim]:
+    claims = []
+    for key, pos in positions.items():
+        legs = [s for s in (pos.get("short_symbol"), pos.get("long_symbol")) if s]
+        if legs:
+            claims.append(PositionClaim(position_id=key, legs=legs))
+    return claims
+
+
+def _extract_cryptobot_claims(positions: Dict[str, Any]) -> List[PositionClaim]:
+    claims = []
+    for key, pos in positions.items():
+        raw = pos.get("symbol") or key
+        if not raw:
+            continue
         # Alpaca crypto symbols are unslashed (e.g. "BTCUSD"); local state
         # uses the "BTC/USD" convention — normalize for comparison.
-        out.add(raw.replace("/", ""))
-    return out
+        claims.append(PositionClaim(position_id=key, legs=[raw.replace("/", "")]))
+    return claims
 
 
 @dataclass
@@ -91,7 +129,7 @@ class BotSpec:
     positions_json: str  # relative to `root`
     pnl_field: str  # column name in trades_csv holding realized $ P&L
     time_field: str  # column name holding the trade timestamp
-    symbol_extractor: Any  # Dict[str, Any] -> Set[str]
+    claim_extractor: Any  # Dict[str, Any] -> List[PositionClaim]
 
     @property
     def trades_path(self) -> str:
@@ -104,13 +142,13 @@ class BotSpec:
 
 BOT_SPECS: List[BotSpec] = [
     BotSpec("AlpacaBot", "AlpacaBot", "data/trades.csv", "data/state/positions.json",
-            "pnl", "timestamp", _extract_alpacabot_symbols),
+            "pnl", "timestamp", _extract_alpacabot_claims),
     BotSpec("CallBuyer", "CallBuyer", "data/trades.csv", "data/state/positions.json",
-            "pnl_dollar", "timestamp", _extract_callbuyer_symbols),
+            "pnl_dollar", "timestamp", _extract_callbuyer_claims),
     BotSpec("PutSeller", "PutSeller", "data/trades.csv", "data/state/positions.json",
-            "pnl", "timestamp", _extract_putseller_symbols),
+            "pnl", "timestamp", _extract_putseller_claims),
     BotSpec("CryptoBot", "CryptoBot", "data/trades.csv", "data/state/positions.json",
-            "pnl_usd", "timestamp", _extract_cryptobot_symbols),
+            "pnl_usd", "timestamp", _extract_cryptobot_claims),
 ]
 
 
@@ -226,18 +264,18 @@ def _rule_verdict(m: BotMetrics) -> Tuple[List[Tuple[str, bool, str]], bool]:
     return criteria, overall
 
 
-def _load_positions(spec: BotSpec) -> Tuple[Dict[str, Any], Set[str], Optional[str]]:
+def _load_positions(spec: BotSpec) -> Tuple[Dict[str, Any], List[PositionClaim], Optional[str]]:
     path = spec.positions_path
     if not os.path.exists(path):
-        return {}, set(), f"positions file not found at {os.path.relpath(path, BASE_DIR)}"
+        return {}, [], f"positions file not found at {os.path.relpath(path, BASE_DIR)}"
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception as e:  # noqa: BLE001
-        return {}, set(), f"failed to read positions file: {e}"
+        return {}, [], f"failed to read positions file: {e}"
     if not isinstance(data, dict):
-        return {}, set(), "positions file did not contain a JSON object"
-    return data, spec.symbol_extractor(data), None
+        return {}, [], "positions file did not contain a JSON object"
+    return data, spec.claim_extractor(data), None
 
 
 def _fetch_broker_positions() -> Tuple[Optional[List[Dict[str, Any]]], str]:
@@ -276,26 +314,85 @@ def _fetch_broker_positions() -> Tuple[Optional[List[Dict[str, Any]]], str]:
     return out, "ok"
 
 
-def _reconcile(bot_symbol_sets: Dict[str, Set[str]],
+def _broker_symbols_present(broker_positions: List[Dict[str, Any]]) -> Set[str]:
+    """Symbols the broker reports with a non-zero quantity.
+
+    A qty==0 row can appear transiently during settlement lag (a leg that
+    just closed but hasn't dropped off the positions list yet) — treat it
+    as absent so it doesn't cause a false ORPHAN alert or mask a real
+    PHANTOM condition.
+    """
+    present = set()
+    for p in broker_positions:
+        sym = p.get("symbol")
+        if not sym:
+            continue
+        qty = p.get("qty")
+        try:
+            qty_val = float(qty) if qty is not None else None
+        except (TypeError, ValueError):
+            qty_val = None
+        if qty_val == 0:
+            continue
+        present.add(sym)
+    return present
+
+
+def _reconcile(bot_claims: Dict[str, List[PositionClaim]],
                broker_positions: Optional[List[Dict[str, Any]]]
-               ) -> Tuple[List[str], List[str]]:
-    """Return (phantom_alerts, orphan_alerts)."""
+               ) -> Tuple[List[str], List[str], List[str]]:
+    """Return (phantom_alerts, orphan_alerts, one_leg_phantom_alerts).
+
+    - A claim whose legs are ALL present at the broker is fully matched
+      (no alert).
+    - A claim whose legs are ALL absent is a full PHANTOM (bot thinks it
+      holds a position the broker has no trace of at all).
+    - A multi-leg claim where SOME (but not all) legs are present is a
+      naked-leg condition: the local spread believes it holds a hedge
+      that no longer exists at the broker. This is reported separately
+      (one_leg_phantom_alerts) since it is the more dangerous of the two
+      and must never be silently merged into a generic phantom count.
+    """
     phantoms: List[str] = []
     orphans: List[str] = []
+    one_leg_phantoms: List[str] = []
     if broker_positions is None:
-        return phantoms, orphans
+        return phantoms, orphans, one_leg_phantoms
 
-    broker_symbols = {p["symbol"] for p in broker_positions if p.get("symbol")}
-    claimed_by_any: Set[str] = set()
-    for bot, symbols in bot_symbol_sets.items():
-        claimed_by_any |= symbols
-        for sym in sorted(symbols - broker_symbols):
-            phantoms.append(f"PHANTOM ALERT (bot {bot}): {sym} tracked locally but NOT found at broker")
+    broker_symbols = _broker_symbols_present(broker_positions)
+    claimed_symbols: Set[str] = set()
 
-    for sym in sorted(broker_symbols - claimed_by_any):
+    for bot, claims in bot_claims.items():
+        for claim in claims:
+            legs = claim.legs
+            if not legs:
+                continue
+            claimed_symbols |= set(legs)
+            present = [leg for leg in legs if leg in broker_symbols]
+            missing = [leg for leg in legs if leg not in broker_symbols]
+
+            if not missing:
+                continue  # fully matched, no alert
+
+            if len(legs) == 1 or not present:
+                # Single-leg position missing, or a multi-leg spread whose
+                # legs are ALL gone: the whole tracked position is a phantom.
+                phantoms.append(
+                    f"PHANTOM ALERT (bot {bot}): {claim.position_id} "
+                    f"(legs: {', '.join(legs)}) tracked locally but NOT found at broker"
+                )
+            else:
+                # Some (but not all) legs missing: naked-leg risk.
+                one_leg_phantoms.append(
+                    f"ONE-LEG PHANTOM ALERT (bot {bot}): {claim.position_id} has "
+                    f"leg(s) MISSING at broker: {', '.join(missing)} — while "
+                    f"{', '.join(present)} is still open (NAKED LEG risk)"
+                )
+
+    for sym in sorted(broker_symbols - claimed_symbols):
         orphans.append(f"ORPHAN ALERT: broker position {sym} is not claimed by any bot")
 
-    return phantoms, orphans
+    return phantoms, orphans, one_leg_phantoms
 
 
 def _fmt_money(v: float) -> str:
@@ -309,18 +406,18 @@ def build_report(bot_names: Optional[List[str]] = None) -> Dict[str, Any]:
     metrics_by_bot: Dict[str, BotMetrics] = {}
     verdicts_by_bot: Dict[str, Tuple[List[Tuple[str, bool, str]], bool]] = {}
     positions_notes: Dict[str, Optional[str]] = {}
-    bot_symbol_sets: Dict[str, Set[str]] = {}
+    bot_claims: Dict[str, List[PositionClaim]] = {}
 
     for spec in specs:
         m = _compute_metrics(spec)
         metrics_by_bot[spec.name] = m
         verdicts_by_bot[spec.name] = _rule_verdict(m)
-        _, symbols, note = _load_positions(spec)
-        bot_symbol_sets[spec.name] = symbols
+        _, claims, note = _load_positions(spec)
+        bot_claims[spec.name] = claims
         positions_notes[spec.name] = note
 
     broker_positions, broker_note = _fetch_broker_positions()
-    phantoms, orphans = _reconcile(bot_symbol_sets, broker_positions)
+    phantoms, orphans, one_leg_phantoms = _reconcile(bot_claims, broker_positions)
 
     return {
         "specs": specs,
@@ -331,18 +428,22 @@ def build_report(bot_names: Optional[List[str]] = None) -> Dict[str, Any]:
         "broker_note": broker_note,
         "phantoms": phantoms,
         "orphans": orphans,
+        "one_leg_phantoms": one_leg_phantoms,
     }
 
 
 def print_report(report: Dict[str, Any]) -> None:
     phantoms = report["phantoms"]
     orphans = report["orphans"]
+    one_leg_phantoms = report["one_leg_phantoms"]
 
     # --- CRITICAL section (phantoms) always printed first, if any ---
-    if phantoms:
+    if phantoms or one_leg_phantoms:
         print("=" * 70)
         print("CRITICAL: PHANTOM POSITIONS DETECTED")
         print("=" * 70)
+        for line in one_leg_phantoms:
+            print(f"  !! {line}")
         for line in phantoms:
             print(f"  !! {line}")
         print()
@@ -393,7 +494,7 @@ def print_report(report: Dict[str, Any]) -> None:
         print(f"  SKIPPED — {report['broker_note']}")
     else:
         print(f"  Broker positions fetched: {len(report['broker_positions'])}")
-        if not phantoms:
+        if not phantoms and not one_leg_phantoms:
             print("  No PHANTOM positions found.")
         if orphans:
             for line in orphans:
@@ -424,6 +525,7 @@ def main() -> int:
     if args.json:
         summary = {
             "phantoms": report["phantoms"],
+            "one_leg_phantoms": report["one_leg_phantoms"],
             "orphans": report["orphans"],
             "bots": {
                 spec.name: {
@@ -441,7 +543,7 @@ def main() -> int:
         print("--- JSON SUMMARY ---")
         print(json.dumps(summary, indent=2, default=str))
 
-    return 1 if report["phantoms"] else 0
+    return 1 if (report["phantoms"] or report["one_leg_phantoms"]) else 0
 
 
 if __name__ == "__main__":
