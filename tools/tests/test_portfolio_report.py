@@ -11,7 +11,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from portfolio_report import PositionClaim, _reconcile  # noqa: E402
+from portfolio_report import PositionClaim, _reconcile, _extract_cryptobot_claims  # noqa: E402
 
 
 def _broker_pos(symbol, qty="1"):
@@ -121,6 +121,37 @@ class TestReconcileOrphansAndZeroQty(unittest.TestCase):
         self.assertEqual(phantoms, [])
         self.assertEqual(orphans, [])
         self.assertEqual(one_leg, [])
+
+
+class TestExtractCryptobotClaimsSkipsFutures(unittest.TestCase):
+    """The futures leg is disabled per the owner's Alpaca-only directive;
+    legacy PI_*-prefixed simulated Kraken Futures keys must never be
+    surfaced as claims (they were never real broker positions)."""
+
+    def test_pi_prefixed_symbol_is_skipped(self):
+        positions = {"PI_XBTUSD_1": {"symbol": "PI_XBTUSD"}}
+        claims = _extract_cryptobot_claims(positions)
+        self.assertEqual(claims, [])
+
+    def test_pi_prefixed_key_without_symbol_field_is_skipped(self):
+        positions = {"PI_ETHUSD_2": {}}
+        claims = _extract_cryptobot_claims(positions)
+        self.assertEqual(claims, [])
+
+    def test_normal_spot_symbol_still_produces_a_claim(self):
+        positions = {"AAVE/USD": {"symbol": "AAVE/USD", "broker_qty": 2.0}}
+        claims = _extract_cryptobot_claims(positions)
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0].legs, ["AAVEUSD"])
+
+    def test_mixed_positions_only_skip_futures_entries(self):
+        positions = {
+            "PI_XBTUSD_1": {"symbol": "PI_XBTUSD"},
+            "BTC/USD": {"symbol": "BTC/USD"},
+        }
+        claims = _extract_cryptobot_claims(positions)
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0].position_id, "BTC/USD")
 
 
 if __name__ == "__main__":

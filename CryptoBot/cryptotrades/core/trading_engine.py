@@ -2369,7 +2369,16 @@ class TradingBot:
             return False
 
     def _alpaca_buy_spot(self, symbol: str, notional: float) -> float:
-        """Submit a real Alpaca market buy for a spot crypto symbol. Returns filled qty (0.0 on failure)."""
+        """Submit a real Alpaca market buy for a spot crypto symbol.
+
+        Returns the CONFIRMED filled qty. Returns 0.0 if the order failed to
+        submit OR if the fill could not be confirmed within the poll window —
+        callers MUST treat 0.0 as "do not track this as an open position",
+        never as "filled with qty 0" (this is the bug class that created the
+        ONDO/HYPE phantom positions — see fix/cryptobot-fill-confirmation).
+        On an unconfirmed fill this also attempts to cancel the resting order
+        so it can't fill later behind the bot's back with no local record.
+        """
         if not self.trading_client:
             return 0.0
         try:
@@ -2379,24 +2388,40 @@ class TradingBot:
                 side=OrderSide.BUY,
                 time_in_force=TimeInForce.GTC,
             ))
-            # Crypto market orders usually fill near-instantly; poll briefly for the fill qty
-            for _ in range(3):
+            # Crypto market orders usually fill near-instantly; poll for the fill qty.
+            # Extended from 3x1s to 6x2s (12s total) to reduce false-negative timeouts.
+            for _ in range(6):
                 filled = getattr(order, "filled_qty", None)
                 if filled and float(filled) > 0:
                     self.logger.info(f"ALPACA ORDER: BUY {symbol} filled_qty={filled} order_id={order.id}")
                     return float(filled)
-                time.sleep(1)
+                time.sleep(2)
                 order = self.trading_client.get_order_by_id(order.id)
-            self.logger.warning(f"ALPACA ORDER: BUY {symbol} submitted (id={order.id}) but no fill qty yet")
-            return float(getattr(order, "filled_qty", 0) or 0)
+            self.logger.warning(
+                f"ALPACA ORDER: BUY {symbol} submitted (id={order.id}) but fill NOT CONFIRMED "
+                f"after poll window — treating as unfilled, will NOT be tracked as a position"
+            )
+            try:
+                self.trading_client.cancel_order_by_id(order.id)
+            except Exception:
+                pass  # best-effort — order may have already filled/expired
+            return 0.0
         except Exception as e:
             self.logger.error(f"ALPACA ORDER FAILED: BUY {symbol} notional=${notional:.2f}: {e}")
             return 0.0
 
-    def _alpaca_sell_spot(self, symbol: str, qty: float) -> bool:
-        """Submit a real Alpaca market sell to close a spot crypto position."""
+    def _alpaca_sell_spot(self, symbol: str, qty: float) -> float:
+        """Submit a real Alpaca market sell to close (or reduce) a spot crypto position.
+
+        Returns the CONFIRMED sold qty — may be less than requested on a
+        partial fill, or 0.0 if the order failed / could not be confirmed.
+        Callers MUST check the return value against the requested qty before
+        assuming the position is fully closed at the broker (this is the bug
+        class that created the AAVE/PEPE/UNI orphans — see
+        fix/cryptobot-fill-confirmation).
+        """
         if not self.trading_client or qty <= 0:
-            return False
+            return 0.0
         # Crypto trading fees are deducted from the base asset, so the tracked fill
         # qty can slightly exceed what's actually held — clamp to the real balance.
         try:
@@ -2413,11 +2438,22 @@ class TradingBot:
                 side=OrderSide.SELL,
                 time_in_force=TimeInForce.GTC,
             ))
-            self.logger.info(f"ALPACA ORDER: SELL {symbol} qty={qty} order_id={order.id}")
-            return True
+            # Crypto market orders usually fill near-instantly; poll briefly for the fill qty
+            for _ in range(6):
+                filled = getattr(order, "filled_qty", None)
+                if filled and float(filled) > 0:
+                    self.logger.info(f"ALPACA ORDER: SELL {symbol} filled_qty={filled} order_id={order.id}")
+                    return float(filled)
+                time.sleep(2)
+                order = self.trading_client.get_order_by_id(order.id)
+            self.logger.warning(
+                f"ALPACA ORDER: SELL {symbol} submitted (id={order.id}) but fill NOT CONFIRMED "
+                f"after poll window — requested qty={qty} may still be open at the broker"
+            )
+            return 0.0
         except Exception as e:
             self.logger.error(f"ALPACA ORDER FAILED: SELL {symbol} qty={qty}: {e}")
-            return False
+            return 0.0
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown gracefully."""
@@ -3289,9 +3325,27 @@ class TradingBot:
         is_futures = symbol.startswith("PI_")
         fill_price = self._apply_slippage(price, position.direction, is_entry=False, is_futures=is_futures)
 
-        # Close the matching real Alpaca order, if one was opened
+        # Close the matching real Alpaca order, if one was opened. Check the
+        # CONFIRMED sold qty before deleting any state — a silently-ignored
+        # failed/partial sell is exactly what created the AAVE/PEPE/UNI orphans.
         if position.broker_qty > 0:
-            self._alpaca_sell_spot(symbol, position.broker_qty)
+            sold_qty = self._alpaca_sell_spot(symbol, position.broker_qty)
+            if sold_qty <= 0:
+                self.logger.warning(
+                    f"CLOSE {symbol}: Alpaca sell did NOT confirm any fill — "
+                    f"KEEPING position tracked at broker_qty={position.broker_qty:.8f} for retry"
+                )
+                return
+            if sold_qty < position.broker_qty * 0.999:
+                remaining = position.broker_qty - sold_qty
+                self.logger.warning(
+                    f"CLOSE {symbol}: Alpaca sell PARTIALLY filled ({sold_qty:.8f}/"
+                    f"{position.broker_qty:.8f}) — KEEPING position tracked with corrected "
+                    f"remaining qty={remaining:.8f} for retry"
+                )
+                position.broker_qty = remaining
+                self._save_state()
+                return
         elif is_futures and position.kraken_order_id:
             kraken_close_side = "sell" if position.direction == "LONG" else "buy"
             self._kraken_close_futures(symbol, kraken_close_side, position.size, fill_price)
@@ -4164,6 +4218,12 @@ class TradingBot:
             # Real order on Alpaca — spot longs only (Alpaca has no crypto shorting/futures)
             if not is_futures and signal.direction == "LONG":
                 position.broker_qty = self._alpaca_buy_spot(signal.symbol, size)
+                if position.broker_qty <= 0:
+                    self.logger.warning(
+                        f"SKIP OPEN {signal.direction} {signal.symbol}: Alpaca buy did not "
+                        f"confirm a fill — not tracking a phantom position"
+                    )
+                    continue
             elif is_futures:
                 kraken_side = "buy" if signal.direction == "LONG" else "sell"
                 position.kraken_order_id = self._kraken_open_futures(signal.symbol, kraken_side, size, price)
