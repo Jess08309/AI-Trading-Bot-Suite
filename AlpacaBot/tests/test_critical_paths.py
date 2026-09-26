@@ -503,5 +503,99 @@ class TestSpreadFillConfirmation(unittest.TestCase):
         self.assertAlmostEqual(trade["pnl_pct"], -1.0, places=2)
 
 
+class TestSpreadExitValuation(unittest.TestCase):
+    """Test that spread PnL valuation is bounded and doesn't false-trigger a
+    stop loss on noisy/stale quotes.
+    BUG CAUGHT: a single bad short-leg quote (or missing quote) could push
+    current_spread_value far outside the economically valid [0, spread_width]
+    range, producing a falsely huge loss like -230% of debit and triggering
+    SPREAD_STOP_LOSS when the real loss was much smaller.
+    """
+
+    def _make_engine(self):
+        with patch('core.config.Config') as MockConfig, \
+             patch('core.api_client.AlpacaAPI') as MockAPI, \
+             patch('core.options_handler.OptionsHandler'), \
+             patch('core.risk_manager.RiskManager'), \
+             patch('core.scanner.MarketScanner'), \
+             patch('utils.ml_model.OptionsMLModel'), \
+             patch('utils.sentiment.MarketSentimentAnalyzer'), \
+             patch('utils.rl_agent.RLShadowAgent'), \
+             patch('utils.meta_learner.MetaLearner'):
+
+            config = MockConfig()
+            config.LOG_DIR = 'logs'
+            config.TRADE_LOG = 'data/trades.csv'
+            config.STATE_FILE = 'data/state/bot_state.json'
+            config.MAX_POSITIONS = 5
+            config.MAX_OPENS_PER_CYCLE = 2
+            config.WATCHLIST = ['SPY', 'AAPL']
+            config.SCANNER_ENABLED = True
+            config.LOOKBACK_BARS = 50
+            config.INITIAL_BALANCE = 100000
+            config.ALLOCATION_PCT = 0.60
+            config.SPREAD_STOP_LOSS_PCT = -10.0
+            config.SPREAD_TP_PCT_OF_MAX = 0.80
+            config.SPREAD_TRAILING_TRIGGER = 0.50
+            config.SPREAD_TRAILING_STOP_PCT = 0.25
+            config.SPREAD_NEAREXP_TRAIL_PCT = 0.15
+            config.MIN_DTE_EXIT = 0
+
+            from core.trading_engine import ScalpTradingEngine
+            engine = ScalpTradingEngine(config)
+            return engine
+
+    def _make_spread_position(self):
+        return {
+            "strategy": "spread",
+            "symbol": "NFLX250101C00500000",
+            "short_leg_symbol": "NFLX250101C00510000",
+            "underlying": "NFLX",
+            "net_debit": 2.00,
+            "peak_spread_value": 2.00,
+            "spread_width": 10.0,
+            "max_profit": 8.0,
+            "expiration": "2099-01-01",
+            "entry_time": datetime.now().isoformat(),
+        }
+
+    def test_stale_short_leg_quote_does_not_blow_up_spread_value(self):
+        """A wildly inflated/stale short-leg quote must be clamped, not
+        allowed to drive the spread value negative beyond -100% of debit."""
+        engine = self._make_engine()
+        pos = self._make_spread_position()
+        engine.positions = {pos["symbol"]: pos}
+
+        # Long leg looks normal, but the short leg quote is bad/stale and
+        # wildly higher than the long leg -- economically impossible for a
+        # valid debit call spread (short strike > long strike).
+        engine.api.get_option_quote = MagicMock(side_effect=lambda sym: (
+            {"mid": 1.50} if sym == pos["symbol"] else {"mid": 25.00}
+        ))
+
+        engine._check_exits()
+
+        current = pos["current_spread_value"]
+        # Value must stay within the economically valid [0, spread_width] range.
+        self.assertGreaterEqual(current, 0.0)
+        self.assertLessEqual(current, pos["spread_width"])
+
+    def test_missing_short_leg_quote_skips_update(self):
+        """If the short leg quote fails entirely, don't compute a bogus
+        spread value from the long leg alone."""
+        engine = self._make_engine()
+        pos = self._make_spread_position()
+        engine.positions = {pos["symbol"]: pos}
+
+        engine.api.get_option_quote = MagicMock(side_effect=lambda sym: (
+            {"mid": 1.50} if sym == pos["symbol"] else None
+        ))
+
+        engine._check_exits()
+
+        # current_spread_value should remain unset / unchanged (falls back to entry).
+        self.assertNotIn("current_spread_value", pos)
+
+
 if __name__ == '__main__':
     unittest.main()
