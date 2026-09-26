@@ -64,6 +64,25 @@ class TestPortfolioReportReconciliation(unittest.TestCase):
         self.assertEqual(phantoms, [])
         self.assertEqual(orphans, [])
 
+    def test_zero_qty_broker_row_is_absent_for_local_position(self):
+        broker_positions = [
+            {"symbol": "AAPL260101C00200000", "qty": "0"},
+        ]
+        bot_positions = {
+            "CallBuyer": {
+                "AAPL260101C00200000": {
+                    "contract": "AAPL260101C00200000",
+                }
+            }
+        }
+
+        phantoms, orphans = portfolio_report._reconcile(bot_positions, broker_positions)
+
+        self.assertEqual(len(phantoms), 1)
+        self.assertIn("CallBuyer", phantoms[0])
+        self.assertIn("AAPL260101C00200000", phantoms[0])
+        self.assertEqual(orphans, [])
+
 
 if __name__ == "__main__":
     unittest.main()
