@@ -417,5 +417,39 @@ class TestCallEngineContractParsing(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestCallBuyerEntriesPaused(unittest.TestCase):
+    """Test the ENTRIES_PAUSED kill-switch: blocks new entries only, exits keep running."""
+
+    def _make_engine(self, entries_paused: bool):
+        with patch('core.call_engine.CallBuyerAPI'), \
+             patch('core.call_engine.RiskManager'), \
+             patch('core.call_engine.CallBuyerFeatureEngine'), \
+             patch('core.call_engine.CallBuyerMLModel'), \
+             patch('core.call_engine.MetaLearner'), \
+             patch('core.call_engine.RegimeDetector'), \
+             patch('core.call_engine.CallBuyerEngine._load_positions'):
+            from core.call_engine import CallBuyerEngine
+            from core.config import CallBuyerConfig
+
+            config = CallBuyerConfig()
+            config.ENTRIES_PAUSED = entries_paused
+            return CallBuyerEngine(config)
+
+    def test_paused_config_skips_entry_evaluation(self):
+        """ENTRIES_PAUSED=True must return before any account/risk check runs."""
+        engine = self._make_engine(entries_paused=True)
+        engine.api.get_account = MagicMock()
+        engine._scan_for_opportunities()
+        engine.api.get_account.assert_not_called()
+
+    def test_paused_config_still_runs_exit_logic(self):
+        """ENTRIES_PAUSED=True must not affect exit checks for open positions."""
+        engine = self._make_engine(entries_paused=True)
+        engine.positions = {"p1": {"contract": "NVDA260321C00150000", "entry_price": 5.0}}
+        engine._check_exit = MagicMock(return_value=None)
+        engine._check_all_positions()
+        engine._check_exit.assert_called_once_with("p1", engine.positions["p1"])
+
+
 if __name__ == '__main__':
     unittest.main()

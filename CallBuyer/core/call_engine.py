@@ -364,7 +364,7 @@ class CallBuyerEngine:
                 log.warning(
                     f"PORTFOLIO CAP: aggregate risk ${total_risk:,.0f} = "
                     f"{exposure_pct:.1%} of ${equity:,.0f} equity "
-                    f"(cap={PORTFOLIO_MAX_PCT:.0%}) \u2014 blocking new entries"
+                    f"(cap={PORTFOLIO_MAX_PCT:.0%}) — blocking new entries"
                 )
                 return False, exposure_pct
             return True, exposure_pct
@@ -460,6 +460,10 @@ class CallBuyerEngine:
 
     def _scan_for_opportunities(self):
         """Scan watchlist for momentum breakout opportunities."""
+        if self.config.ENTRIES_PAUSED:
+            log.info("entries paused via ENTRIES_PAUSED")
+            return
+
         if len(self.positions) >= self.config.MAX_POSITIONS:
             log.info(f"At max positions ({len(self.positions)}), skipping scan")
             return
