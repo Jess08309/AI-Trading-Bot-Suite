@@ -416,6 +416,47 @@ class TestFillConfirmation(unittest.TestCase):
         self.assertEqual(result, 1.5)
         bot.trading_client.cancel_order_by_id.assert_not_called()
 
+    def test_sell_qty_available_none_falls_back_to_position_qty(self):
+        """Missing qty_available must fall back to total qty for conservative clamping."""
+        order = MagicMock(id="order-3", filled_qty="0.6")
+        broker_position = MagicMock(qty_available=None, qty="0.6")
+        bot = self._make_bot()
+        bot.trading_client.get_open_position.return_value = broker_position
+        bot.trading_client.submit_order.return_value = order
+
+        with patch("cryptotrades.core.trading_engine.time.sleep"):
+            result = bot._alpaca_sell_spot("BTC/USD", 1.0)
+
+        submitted_order = bot.trading_client.submit_order.call_args.args[0]
+        self.assertEqual(result, 0.6)
+        self.assertAlmostEqual(float(submitted_order.qty), 0.6)
+
+    def test_sell_qty_available_zero_does_not_fallback_to_position_qty(self):
+        """Explicit zero qty_available must stay zero and skip sell submission."""
+        broker_position = MagicMock(qty_available="0", qty="0.6")
+        bot = self._make_bot()
+        bot.trading_client.get_open_position.return_value = broker_position
+
+        result = bot._alpaca_sell_spot("BTC/USD", 1.0)
+
+        self.assertEqual(result, 0.0)
+        bot.trading_client.submit_order.assert_not_called()
+
+    def test_sell_qty_available_positive_clamps_requested_qty(self):
+        """Explicit positive qty_available must clamp the submitted sell qty."""
+        order = MagicMock(id="order-4", filled_qty="0.4")
+        broker_position = MagicMock(qty_available="0.4", qty="0.9")
+        bot = self._make_bot()
+        bot.trading_client.get_open_position.return_value = broker_position
+        bot.trading_client.submit_order.return_value = order
+
+        with patch("cryptotrades.core.trading_engine.time.sleep"):
+            result = bot._alpaca_sell_spot("BTC/USD", 1.2)
+
+        submitted_order = bot.trading_client.submit_order.call_args.args[0]
+        self.assertEqual(result, 0.4)
+        self.assertAlmostEqual(float(submitted_order.qty), 0.4)
+
     def test_sell_zero_fill_keeps_position_tracked(self):
         """A sell that doesn't confirm any fill must NOT delete local state."""
         position = self._make_position(broker_qty=2.0)
@@ -427,6 +468,23 @@ class TestFillConfirmation(unittest.TestCase):
         self.assertIn("AAVE/USD", bot.positions)
         self.assertEqual(bot.positions["AAVE/USD"].broker_qty, 2.0)
         bot._save_state.assert_not_called()
+
+    def test_repeated_broker_zero_qty_available_reconciles_explicitly(self):
+        """Repeated explicit broker-zero confirmations should reconcile instead of retrying forever."""
+        position = self._make_position(broker_qty=2.0)
+        broker_position = MagicMock(qty_available="0", qty="2.0")
+        bot = self._make_bot(positions={"AAVE/USD": position})
+        bot._alpaca_sell_spot = MagicMock(return_value=0.0)
+        bot.trading_client.get_open_position.return_value = broker_position
+
+        bot._close_position("AAVE/USD", 100.0, "STOP_LOSS", 0.0)
+        self.assertIn("AAVE/USD", bot.positions)
+        self.assertEqual(bot.positions["AAVE/USD"].broker_zero_qty_confirmations, 1)
+
+        bot._close_position("AAVE/USD", 100.0, "STOP_LOSS", 0.0)
+        self.assertNotIn("AAVE/USD", bot.positions)
+        self.assertEqual(bot._save_state.call_count, 2)
+        bot.risk_manager.record_trade.assert_called_once()
 
     def test_sell_partial_fill_keeps_position_with_corrected_qty(self):
         """A partial sell must retain the position with the remaining qty, not drop state."""

@@ -44,6 +44,8 @@ try:
 except Exception:
     ALPACA_TRADING_SDK_AVAILABLE = False
 ALPACA_DATA_URL = "https://data.alpaca.markets/v1beta3/crypto/us"
+_ALPACA_QTY_UNSET = object()
+_ALPACA_ZERO_QTY_RECONCILE_CONFIRMATIONS = 2
 
 # Real order execution for Kraken Futures (in-house signed REST client)
 from core.kraken_futures_client import KrakenFuturesClient
@@ -386,6 +388,7 @@ class Position:
     ml_confidence: float = 0.0
     entry_reason: str = ""
     broker_qty: float = 0.0  # Real Alpaca fill qty, if a live spot order was placed
+    broker_zero_qty_confirmations: int = 0  # Consecutive broker-confirmed zero-available close attempts
     kraken_order_id: str = ""  # Real Kraken Futures order id, if a live futures order was placed
 
 
@@ -2425,12 +2428,13 @@ class TradingBot:
         # Crypto trading fees are deducted from the base asset, so the tracked fill
         # qty can slightly exceed what's actually held — clamp to the real balance.
         try:
-            position = self.trading_client.get_open_position(symbol.replace("/", ""))
-            available = float(getattr(position, "qty_available", None) or position.qty)
-            if available > 0:
+            available, _explicit_available = self._alpaca_spot_available_qty(symbol)
+            if available is not None:
                 qty = min(qty, available)
         except Exception:
             pass
+        if qty <= 0:
+            return 0.0
         try:
             order = self.trading_client.submit_order(MarketOrderRequest(
                 symbol=symbol,
@@ -2454,6 +2458,17 @@ class TradingBot:
         except Exception as e:
             self.logger.error(f"ALPACA ORDER FAILED: SELL {symbol} qty={qty}: {e}")
             return 0.0
+
+    def _alpaca_spot_available_qty(self, symbol: str) -> Tuple[Optional[float], bool]:
+        """Return (available_qty, used_explicit_qty_available) for a live Alpaca spot position."""
+        if not self.trading_client:
+            return None, False
+        position = self.trading_client.get_open_position(symbol.replace("/", ""))
+        raw_available = getattr(position, "qty_available", _ALPACA_QTY_UNSET)
+        if raw_available is _ALPACA_QTY_UNSET or raw_available is None:
+            raw_qty = getattr(position, "qty", None)
+            return (float(raw_qty), False) if raw_qty is not None else (None, False)
+        return float(raw_available), True
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown gracefully."""
@@ -3329,13 +3344,46 @@ class TradingBot:
         # CONFIRMED sold qty before deleting any state — a silently-ignored
         # failed/partial sell is exactly what created the AAVE/PEPE/UNI orphans.
         if position.broker_qty > 0:
-            sold_qty = self._alpaca_sell_spot(symbol, position.broker_qty)
+            tracked_broker_qty = position.broker_qty
+            sold_qty = self._alpaca_sell_spot(symbol, tracked_broker_qty)
             if sold_qty <= 0:
-                self.logger.warning(
-                    f"CLOSE {symbol}: Alpaca sell did NOT confirm any fill — "
-                    f"KEEPING position tracked at broker_qty={position.broker_qty:.8f} for retry"
-                )
-                return
+                broker_zero_confirmed = False
+                try:
+                    available, explicit_available = self._alpaca_spot_available_qty(symbol)
+                    broker_zero_confirmed = bool(
+                        explicit_available
+                        and available is not None
+                        and available <= 0
+                    )
+                except Exception:
+                    broker_zero_confirmed = False
+
+                if broker_zero_confirmed:
+                    position.broker_zero_qty_confirmations += 1
+                    if position.broker_zero_qty_confirmations < _ALPACA_ZERO_QTY_RECONCILE_CONFIRMATIONS:
+                        self.logger.warning(
+                            f"CLOSE {symbol}: Alpaca broker confirmed qty_available=0.0 "
+                            f"for tracked broker_qty={tracked_broker_qty:.8f} "
+                            f"(confirmation {position.broker_zero_qty_confirmations}/"
+                            f"{_ALPACA_ZERO_QTY_RECONCILE_CONFIRMATIONS}) — "
+                            f"KEEPING position tracked pending explicit reconciliation"
+                        )
+                        self._save_state()
+                        return
+                    self.logger.warning(
+                        f"CLOSE {symbol}: Alpaca broker repeatedly confirmed qty_available=0.0 "
+                        f"for tracked broker_qty={tracked_broker_qty:.8f} — "
+                        f"reconciling local broker exposure to zero before closing position"
+                    )
+                    position.broker_qty = 0.0
+                    position.broker_zero_qty_confirmations = 0
+                else:
+                    position.broker_zero_qty_confirmations = 0
+                    self.logger.warning(
+                        f"CLOSE {symbol}: Alpaca sell did NOT confirm any fill — "
+                        f"KEEPING position tracked at broker_qty={position.broker_qty:.8f} for retry"
+                    )
+                    return
             if sold_qty < position.broker_qty * 0.999:
                 remaining = position.broker_qty - sold_qty
                 self.logger.warning(
@@ -3344,6 +3392,7 @@ class TradingBot:
                     f"remaining qty={remaining:.8f} for retry"
                 )
                 position.broker_qty = remaining
+                position.broker_zero_qty_confirmations = 0
                 self._save_state()
                 return
         elif is_futures and position.kraken_order_id:
