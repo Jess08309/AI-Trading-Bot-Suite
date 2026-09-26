@@ -319,6 +319,10 @@ class TradingConfig:
 # Global config instance
 cfg = TradingConfig()
 
+# Fleet-wide kill switch: if this file exists, no new entries are opened.
+# Checked at the top of every cycle (see Workstream F / GO_LIVE_CRITERIA.md).
+KILL_SWITCH_PATH = os.environ.get("KILL_ALL_PATH", "/home/botuser/KILL_ALL")
+
 # ============================================================
 # LOGGING SETUP - ASCII Safe for Windows
 # ============================================================
@@ -4208,6 +4212,16 @@ class TradingBot:
 
                 self.logger.info(f"--- Cycle {self.cycle} {'[TRADE]' if is_trade_cycle else '[RISK]'} ---")
 
+                # Fleet-wide kill switch: checked first, every cycle, before
+                # any blocking calls below (incl. ML retrain/training).
+                # Presence of the file pauses new entries only; exits/risk
+                # checks continue normally.
+                kill_switch_active = os.path.exists(KILL_SWITCH_PATH)
+                if kill_switch_active:
+                    self.logger.warning(
+                        f"KILL_ALL detected at {KILL_SWITCH_PATH} - new entries paused this cycle"
+                    )
+
                 # 0. Universe scan (every 30 min)
                 if self.universe_scanner and self.universe_scanner.should_scan():
                     try:
@@ -4235,7 +4249,7 @@ class TradingBot:
                     signals = self.generate_signals()
                     if signals and self.advisor:
                         signals = self.advisor.evaluate(signals, self.positions, self)
-                    if signals:
+                    if signals and not kill_switch_active:
                         self.execute_signals(signals)
 
                 # 4. Log status

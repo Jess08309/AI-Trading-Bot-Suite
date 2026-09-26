@@ -57,6 +57,10 @@ except ImportError:
 
 log = logging.getLogger("ironcondor.engine")
 
+# Fleet-wide kill switch: if this file exists, no new entries are opened.
+# Checked at the top of every cycle (see Workstream F / GO_LIVE_CRITERIA.md).
+KILL_SWITCH_PATH = os.environ.get("KILL_ALL_PATH", "/home/botuser/KILL_ALL")
+
 
 class PutSellerEngine:
     """Main engine for credit put + call spread (iron condor) strategy."""
@@ -507,6 +511,15 @@ class PutSellerEngine:
 
                 self._cycle += 1
 
+                # Fleet-wide kill switch: checked first, every cycle, before
+                # any blocking calls below. Presence of the file pauses new
+                # entries only; exits/monitoring continue normally.
+                kill_switch_active = os.path.exists(KILL_SWITCH_PATH)
+                if kill_switch_active:
+                    log.warning(
+                        f"KILL_ALL detected at {KILL_SWITCH_PATH} - new entries paused this cycle"
+                    )
+
                 # Universe scan — expand watchlist (every 60 min)
                 if (self.universe_scanner
                         and self.universe_scanner.should_scan()):
@@ -534,7 +547,8 @@ class PutSellerEngine:
 
                 # New opportunity scan — every 15 minutes
                 if now - self._last_scan >= self.config.SCAN_INTERVAL_SEC:
-                    self._scan_opportunities()
+                    if not kill_switch_active:
+                        self._scan_opportunities()
                     self._last_scan = now
 
                 # Status update every ~10 cycles
