@@ -1,3 +1,9 @@
+# RESCUED (Workstream D, 2026-09-25): found uncommitted at
+# CallBuyer/core/call_engine.py in the live droplet tree during the
+# PR #9/#11 post-merge git cleanup. Content never matched any commit in
+# repo history and never executed from a git-tracked working tree.
+# Preserved here on droplet/divergence-rescue for later analysis only —
+# NOT merged into main, NOT running anywhere.
 """
 CallBuyer Engine — Momentum Call Buying Strategy (Left Leg)
 
@@ -29,10 +35,6 @@ from core.regime_detector import RegimeDetector
 from core.earnings_check import has_earnings_within
 
 log = logging.getLogger("callbuyer.engine")
-
-# Fleet-wide kill switch: if this file exists, no new entries are opened.
-# Checked at the top of every cycle (see Workstream F / GO_LIVE_CRITERIA.md).
-KILL_SWITCH_PATH = os.environ.get("KILL_ALL_PATH", "/home/botuser/KILL_ALL")
 
 
 class CallBuyerEngine:
@@ -78,7 +80,7 @@ class CallBuyerEngine:
 
         self._load_positions()
 
-    # ── Persistence ──────────────────────────────────────
+    # ── Persistence ────────────────────────
 
     def _load_positions(self):
         try:
@@ -236,7 +238,7 @@ class CallBuyerEngine:
                     pos_id = f"{pos_id}_{strike:.0f}"
 
                 high_water = max(current_price, avg_entry)
-                trailing_active = current_price >= avg_entry * (1 + self.config.TRAILING_ARM_GAIN)
+                trailing_active = current_price >= avg_entry * 1.30
 
                 self.positions[pos_id] = {
                     "symbol": underlying,
@@ -332,7 +334,7 @@ class CallBuyerEngine:
         except (ValueError, IndexError):
             return 0.0
 
-    # ── Main Loop ────────────────────────────────────────
+    # ── Main Loop ───────────────────────
 
 
     def _check_portfolio_exposure(self) -> tuple:
@@ -368,7 +370,7 @@ class CallBuyerEngine:
                 log.warning(
                     f"PORTFOLIO CAP: aggregate risk ${total_risk:,.0f} = "
                     f"{exposure_pct:.1%} of ${equity:,.0f} equity "
-                    f"(cap={PORTFOLIO_MAX_PCT:.0%}) — blocking new entries"
+                    f"(cap={PORTFOLIO_MAX_PCT:.0%}) \u2014 blocking new entries"
                 )
                 return False, exposure_pct
             return True, exposure_pct
@@ -408,15 +410,6 @@ class CallBuyerEngine:
                 now = _time.time()
                 self._cycle += 1
 
-                # Fleet-wide kill switch: checked first, every cycle, before
-                # any blocking calls below. Presence of the file pauses new
-                # entries only; exits/monitoring continue normally.
-                kill_switch_active = os.path.exists(KILL_SWITCH_PATH)
-                if kill_switch_active:
-                    log.warning(
-                        f"KILL_ALL detected at {KILL_SWITCH_PATH} - new entries paused this cycle"
-                    )
-
                 # Universe scan — expand watchlist (every 30 min)
                 if (self.universe_scanner
                         and self.universe_scanner.should_scan()):
@@ -443,8 +436,7 @@ class CallBuyerEngine:
 
                 # Scan for new opportunities every 10 minutes
                 if now - self._last_scan >= self.config.SCAN_INTERVAL_SEC:
-                    if not kill_switch_active:
-                        self._scan_for_opportunities()
+                    self._scan_for_opportunities()
                     self._last_scan = now
 
                     # Check if ML model needs retraining
@@ -470,14 +462,10 @@ class CallBuyerEngine:
     def stop(self):
         self.running = False
 
-    # ── Scanning ─────────────────────────────────────────
+    # ── Scanning ───────────────────────
 
     def _scan_for_opportunities(self):
         """Scan watchlist for momentum breakout opportunities."""
-        if self.config.ENTRIES_PAUSED:
-            log.info("entries paused via ENTRIES_PAUSED")
-            return
-
         if len(self.positions) >= self.config.MAX_POSITIONS:
             log.info(f"At max positions ({len(self.positions)}), skipping scan")
             return
@@ -512,14 +500,14 @@ class CallBuyerEngine:
         except Exception:
             self._spy_bars = None
 
-        # ── Regime Detection ─────────────────────────────
+        # ── Regime Detection ─────────────────
         try:
             regime_bars = self._spy_bars or self.api.get_bars("SPY", days=90)
             if regime_bars and len(regime_bars) >= 30:
                 self._current_regime = self._regime_detector.detect(regime_bars)
                 r = self._current_regime
 
-                # ── Regime Flip Detection ────────────
+                # ── Regime Flip Detection ────────
                 regime_name = r["regime"]
                 flip_state = self._regime_detector.record_regime(
                     regime_name, r["confidence"]
@@ -548,7 +536,7 @@ class CallBuyerEngine:
             log.warning(f"Regime detection failed: {e}")
             self._current_regime = None
 
-        # ── Portfolio-Level Aggregate Exposure Cap ─────────
+        # ── Portfolio-Level Aggregate Exposure Cap ─────
         can_trade_portfolio, portfolio_exposure = self._check_portfolio_exposure()
         if not can_trade_portfolio:
             return
@@ -600,7 +588,7 @@ class CallBuyerEngine:
         if opened:
             log.info(f"Opened {opened} new call position(s)")
 
-    # ── Time-of-Day Window ───────────────────────────────
+    # ── Time-of-Day Window ──────────────────
 
     def _get_time_window(self) -> str:
         """Return 'morning', 'afternoon', or 'closed' based on current ET time.
@@ -742,7 +730,7 @@ class CallBuyerEngine:
             log.warning(f"Error evaluating {symbol}: {e}")
             return None
 
-    # ── Opening Positions ────────────────────────────────
+    # ── Opening Positions ──────────────────
 
     def _open_call(self, candidate: Dict) -> bool:
         """Find the best ITM call and buy it."""
@@ -924,7 +912,7 @@ class CallBuyerEngine:
                  f"ask=${best[3]:.2f} score={best[4]:.3f}")
         return (best[0], best[1], best[2], best[3])
 
-    # ── Position Management ──────────────────────────────
+    # ── Position Management ──────────────────
 
     def _check_all_positions(self):
         """Check all open positions for exit conditions."""
@@ -1003,9 +991,9 @@ class CallBuyerEngine:
             except Exception:
                 pass
 
-            # 4. Trailing Stop — arms after TRAILING_ARM_GAIN gain, trails at TRAILING_STOP_PCT
+            # 4. Trailing Stop — after 30%+ gain, trail at 20%
             high_water = pos.get("high_water", entry_price)
-            if high_water > entry_price * (1 + self.config.TRAILING_ARM_GAIN):
+            if high_water > entry_price * 1.30:  # 30%+ gain reached
                 pos["trailing_active"] = True
                 drawdown = (current_bid - high_water) / high_water if high_water > 0 else 0
                 if drawdown <= -self.config.TRAILING_STOP_PCT:
@@ -1157,7 +1145,7 @@ class CallBuyerEngine:
             pass
         return None
 
-    # ── Status API ───────────────────────────────────────
+    # ── Status API ───────────────────────
 
     def get_status(self) -> Dict:
         """Return engine status for dashboard."""
@@ -1186,7 +1174,7 @@ class CallBuyerEngine:
             },
         }
 
-    # ── Pre-Market Warmup ────────────────────────────────────
+    # ── Pre-Market Warmup ─────────────────
 
     def _should_warmup(self) -> bool:
         """Return True if within 30 min of market open and not yet warmed up today."""
