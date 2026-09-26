@@ -337,15 +337,17 @@ def _reconcile_position(bot: str,
 def _reconcile_local_positions(spec: BotSpec,
                                positions: Dict[str, Any],
                                broker_symbols: Set[str]) -> Tuple[Set[str], List[str]]:
-    claimed_symbols = spec.symbol_extractor(positions)
     phantoms: List[str] = []
 
     if spec.name == "PutSeller":
+        claimed_symbols: Set[str] = set()
         for spread_id, pos in positions.items():
+            legs = [pos.get("short_symbol", ""), pos.get("long_symbol", "")]
+            claimed_symbols.update(leg for leg in legs if leg)
             alert = _reconcile_position(
                 spec.name,
                 spread_id,
-                [pos.get("short_symbol", ""), pos.get("long_symbol", "")],
+                legs,
                 broker_symbols,
             )
             if alert:
@@ -353,24 +355,30 @@ def _reconcile_local_positions(spec: BotSpec,
         return claimed_symbols, phantoms
 
     if spec.name == "AlpacaBot":
+        claimed_symbols: Set[str] = set()
         for keyed_symbol, pos in positions.items():
             if not isinstance(pos, dict):
+                if keyed_symbol:
+                    claimed_symbols.add(keyed_symbol)
                 alert = _reconcile_position(spec.name, keyed_symbol, [keyed_symbol], broker_symbols)
                 if alert:
                     phantoms.append(alert)
                 continue
 
             primary_symbol = pos.get("symbol") or keyed_symbol
+            legs = [primary_symbol, pos.get("short_leg_symbol", "")]
+            claimed_symbols.update(leg for leg in legs if leg)
             alert = _reconcile_position(
                 spec.name,
                 primary_symbol,
-                [primary_symbol, pos.get("short_leg_symbol", "")],
+                legs,
                 broker_symbols,
             )
             if alert:
                 phantoms.append(alert)
         return claimed_symbols, phantoms
 
+    claimed_symbols = spec.symbol_extractor(positions)
     for sym in sorted(claimed_symbols):
         alert = _reconcile_position(spec.name, sym, [sym], broker_symbols)
         if alert:
