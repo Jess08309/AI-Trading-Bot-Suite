@@ -380,5 +380,222 @@ class TestSPYRegimeGateForPuts(unittest.TestCase):
         self.assertIsNone(put_blocked)
 
 
+class TestSpreadFillConfirmation(unittest.TestCase):
+    """Regression tests for the NFLX 2026-09-24 phantom-position bug:
+    a day-limit mleg spread order that never filled was tracked as an
+    open position, then "closed" the next day for a fabricated,
+    impossibly large loss (-230% of debit) when Alpaca reported the
+    legs as not found.
+    """
+
+    def _make_engine(self):
+        with patch('core.config.Config') as MockConfig, \
+             patch('core.api_client.AlpacaAPI'), \
+             patch('core.options_handler.OptionsHandler'), \
+             patch('core.risk_manager.RiskManager'), \
+             patch('core.scanner.MarketScanner'), \
+             patch('utils.ml_model.OptionsMLModel'), \
+             patch('utils.sentiment.MarketSentimentAnalyzer'), \
+             patch('utils.rl_agent.RLShadowAgent'), \
+             patch('utils.meta_learner.MetaLearner'):
+
+            config = MockConfig()
+            config.LOG_DIR = 'logs'
+            config.TRADE_LOG = 'data/trades.csv'
+            config.STATE_FILE = 'data/state/bot_state.json'
+            config.MAX_POSITIONS = 5
+            config.MAX_OPENS_PER_CYCLE = 2
+            config.WATCHLIST = ['SPY']
+            config.SCANNER_ENABLED = False
+            config.LOOKBACK_BARS = 50
+            config.INITIAL_BALANCE = 100000
+            config.ALLOCATION_PCT = 0.60
+            config.MAX_POSITION_PCT = 0.05
+            config.COOLDOWN_BARS = 3
+            config.BAR_INTERVAL_SEC = 60
+
+            from core.trading_engine import ScalpTradingEngine
+            engine = ScalpTradingEngine(config)
+            engine.risk.current_balance = 100000.0
+            engine.risk.get_throttle.return_value = {
+                "size_multiplier": 1.0, "tier_name": "NORMAL"
+            }
+            engine.ml_ready = True
+            engine._regime_flip_mult = 1.0
+            engine._sleep = MagicMock()  # skip real fill-polling delay
+            return engine
+
+    def _make_spread_args(self):
+        signal = {
+            "direction": "call", "score": 5, "ml_confidence": 0.7,
+            "ml_direction": 0.6, "sentiment": 0.1, "ensemble_score": 0.65,
+            "reason": "test",
+        }
+        spread = {
+            "long_leg": {"symbol": "TEST260101C00071000", "strike": 71.0,
+                         "ask": 1.10, "mid": 1.05, "type": "call"},
+            "short_leg": {"symbol": "TEST260101C00072000", "strike": 72.0,
+                          "bid": 0.60, "mid": 0.62},
+            "net_debit": 0.45,
+            "expiration": "2026-01-01",
+            "spread_width": 1.0,
+            "max_profit_per_contract": 0.55,
+            "max_loss_per_contract": 0.45,
+        }
+        return signal, spread
+
+    def test_unfilled_spread_order_is_cancelled_not_tracked(self):
+        """A day-limit spread order that never fills must be cancelled and
+        must NOT create a tracked position (the core NFLX bug)."""
+        engine = self._make_engine()
+        signal, spread = self._make_spread_args()
+        engine.api.submit_mleg_order.return_value = "orderXYZ"
+        engine.api.get_order.return_value = {"status": "expired"}
+
+        result = engine._execute_spread("TEST", signal, spread)
+
+        self.assertFalse(result)
+        self.assertEqual(engine.positions, {})
+        engine.api.cancel_order.assert_called_once_with("orderXYZ")
+
+    def test_filled_spread_order_is_tracked_with_real_fill_price(self):
+        """A confirmed-filled spread order should be tracked using the
+        real filled_avg_price, not the original limit price."""
+        engine = self._make_engine()
+        signal, spread = self._make_spread_args()
+        engine.api.submit_mleg_order.return_value = "orderABC"
+        engine.api.get_order.return_value = {
+            "status": "filled", "filled_avg_price": "0.40"
+        }
+
+        result = engine._execute_spread("TEST", signal, spread)
+
+        self.assertTrue(result)
+        pos = engine.positions["TEST260101C00071000"]
+        self.assertEqual(pos["net_debit"], 0.40)
+        engine.api.cancel_order.assert_not_called()
+
+    def test_spread_pnl_clamped_to_max_loss(self):
+        """Closing a spread can never realize a loss beyond the debit
+        paid (max loss), even if a stale/bad quote suggests otherwise."""
+        engine = self._make_engine()
+        engine._log_trade = MagicMock()  # avoid CSV file I/O in test
+        qty = 61
+        pos = {
+            "strategy": "spread", "strategy_name": "bull_call_spread",
+            "net_debit": 0.45, "current_spread_value": -5.0,
+            "spread_width": 1.0, "max_profit": 0.55, "qty": qty,
+            "short_leg_symbol": "TEST260101C00072000",
+            "entry_price": 0, "current_price": 0, "underlying": "TEST",
+            "direction": "call", "option_type": "call", "strike": 71,
+            "expiration": "2026-01-01", "cost": 0.45 * 100 * qty,
+            "entry_time": datetime.now().isoformat(), "score": 5,
+        }
+        engine.positions["TEST260101C00071000"] = pos
+        engine.api.submit_mleg_order.return_value = None
+        engine.api.close_position.return_value = True  # "not found" fallback
+
+        engine._close_position("TEST260101C00071000", pos, "SPREAD_STOP_LOSS test")
+
+        trade = engine.trade_history[-1]
+        max_loss = -0.45 * 100 * qty
+        self.assertGreaterEqual(trade["pnl"], max_loss - 0.01)
+        self.assertAlmostEqual(trade["pnl_pct"], -1.0, places=2)
+
+
+class TestSpreadExitValuation(unittest.TestCase):
+    """Test that spread PnL valuation is bounded and doesn't false-trigger a
+    stop loss on noisy/stale quotes.
+    BUG CAUGHT: a single bad short-leg quote (or missing quote) could push
+    current_spread_value far outside the economically valid [0, spread_width]
+    range, producing a falsely huge loss like -230% of debit and triggering
+    SPREAD_STOP_LOSS when the real loss was much smaller.
+    """
+
+    def _make_engine(self):
+        with patch('core.config.Config') as MockConfig, \
+             patch('core.api_client.AlpacaAPI') as MockAPI, \
+             patch('core.options_handler.OptionsHandler'), \
+             patch('core.risk_manager.RiskManager'), \
+             patch('core.scanner.MarketScanner'), \
+             patch('utils.ml_model.OptionsMLModel'), \
+             patch('utils.sentiment.MarketSentimentAnalyzer'), \
+             patch('utils.rl_agent.RLShadowAgent'), \
+             patch('utils.meta_learner.MetaLearner'):
+
+            config = MockConfig()
+            config.LOG_DIR = 'logs'
+            config.TRADE_LOG = 'data/trades.csv'
+            config.STATE_FILE = 'data/state/bot_state.json'
+            config.MAX_POSITIONS = 5
+            config.MAX_OPENS_PER_CYCLE = 2
+            config.WATCHLIST = ['SPY', 'AAPL']
+            config.SCANNER_ENABLED = True
+            config.LOOKBACK_BARS = 50
+            config.INITIAL_BALANCE = 100000
+            config.ALLOCATION_PCT = 0.60
+            config.SPREAD_STOP_LOSS_PCT = -10.0
+            config.SPREAD_TP_PCT_OF_MAX = 0.80
+            config.SPREAD_TRAILING_TRIGGER = 0.50
+            config.SPREAD_TRAILING_STOP_PCT = 0.25
+            config.SPREAD_NEAREXP_TRAIL_PCT = 0.15
+            config.MIN_DTE_EXIT = 0
+
+            from core.trading_engine import ScalpTradingEngine
+            engine = ScalpTradingEngine(config)
+            return engine
+
+    def _make_spread_position(self):
+        return {
+            "strategy": "spread",
+            "symbol": "NFLX250101C00500000",
+            "short_leg_symbol": "NFLX250101C00510000",
+            "underlying": "NFLX",
+            "net_debit": 2.00,
+            "peak_spread_value": 2.00,
+            "spread_width": 10.0,
+            "max_profit": 8.0,
+            "expiration": "2099-01-01",
+            "entry_time": datetime.now().isoformat(),
+        }
+
+    def test_stale_short_leg_quote_does_not_blow_up_spread_value(self):
+        """A wildly inflated/stale short-leg quote must be clamped, not
+        allowed to drive the spread value negative beyond -100% of debit."""
+        engine = self._make_engine()
+        pos = self._make_spread_position()
+        engine.positions = {pos["symbol"]: pos}
+
+        # Long leg looks normal, but the short leg quote is bad/stale and
+        # wildly higher than the long leg -- economically impossible for a
+        # valid debit call spread (short strike > long strike).
+        engine.api.get_option_quote = MagicMock(side_effect=lambda sym: (
+            {"mid": 1.50} if sym == pos["symbol"] else {"mid": 25.00}
+        ))
+
+        engine._check_exits()
+
+        current = pos["current_spread_value"]
+        # Value must stay within the economically valid [0, spread_width] range.
+        self.assertGreaterEqual(current, 0.0)
+        self.assertLessEqual(current, pos["spread_width"])
+
+    def test_missing_short_leg_quote_skips_update(self):
+        """If the short leg quote fails entirely, don't compute a bogus
+        spread value from the long leg alone."""
+        engine = self._make_engine()
+        pos = self._make_spread_position()
+        engine.positions = {pos["symbol"]: pos}
+
+        engine.api.get_option_quote = MagicMock(side_effect=lambda sym: (
+            {"mid": 1.50} if sym == pos["symbol"] else None
+        ))
+
+        engine._check_exits()
+
+        # current_spread_value should remain unset / unchanged (falls back to entry).
+        self.assertNotIn("current_spread_value", pos)
+
+
 if __name__ == '__main__':
     unittest.main()

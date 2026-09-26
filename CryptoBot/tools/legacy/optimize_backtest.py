@@ -1,4 +1,15 @@
 """
+ARCHIVED (backtest consolidation, see CryptoBot/backtest/README.md).
+
+Reason: parameter sweep on top of local_backtest_qc_port.py's rules-only
+strategy (archived alongside this file). Closed investigation -- see
+local_backtest_qc_port.py's docstring: a rules-only mechanical strategy
+without CryptoBot's live ML confidence gate does not have a positive edge
+on this data, no matter how it's tuned (best found across all sweep rounds:
+-15.5% net over 2021-2026, still a net loser). Kept here unmodified for
+reference/history. Not maintained, not run in CI.
+============================================================================
+
 Parameter sweep over CryptoBot/tools/local_backtest_qc_port.py's rules-only
 strategy, using the same cached real Alpaca hourly bars. Tests whether a
 higher entry bar (fewer, higher-quality trades) and a better reward:risk

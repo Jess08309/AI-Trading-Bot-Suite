@@ -1,4 +1,27 @@
-"""Train the live bot's ML model using 30-day 1-MINUTE historical data.
+"""
+ARCHIVED (backtest consolidation, see CryptoBot/backtest/README.md).
+
+Reason: superseded by tools/retrain_on_6mo.py, which trains on the same
+live indicator/feature stack (cryptotrades.utils.technical_indicators /
+feature_engine.py) but reads from the 6-month 1-min CSVs downloaded by
+tools/download_6mo_candles.py instead of this script's CACHE_CSV
+(tools/backtests/data/minute_prices.csv), which does not exist anywhere in
+this repo or on the droplet -- this script cannot currently run at all.
+
+AUDIT FINDING (flagged, not fixed -- out of scope for this consolidation,
+no production config changes permitted): this script's MODEL_PATH
+(top-level models/trading_model.joblib) actually matches what's really on
+the droplet (continuously-updated models/trading_model_*.joblib files),
+whereas retrain_on_6mo.py's replacement target (data/models/market_model.joblib,
+loaded via MarketPredictor.load_model()) does NOT match the droplet's live
+model directory. It's unclear from this audit alone which path the live
+TradingBot actually loads from at runtime -- flagging for the user to
+verify/reconcile before relying on retrain_on_6mo.py's output in production.
+
+Kept here unmodified for reference/history. Not maintained, not run in CI.
+============================================================================
+
+Train the live bot's ML model using 30-day 1-MINUTE historical data.
 
 VECTORIZED approach: computes all 15 indicator arrays ONCE per symbol,
 then indexes into them — O(n) instead of O(n²). Finishes in seconds.

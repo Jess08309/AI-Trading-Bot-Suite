@@ -1,4 +1,12 @@
 """
+ARCHIVED (backtest consolidation, see CryptoBot/backtest/README.md).
+
+Reason: round-3 sweep on top of local_backtest_qc_port.py's rules-only
+strategy (archived alongside this file). Closed investigation -- see
+optimize_backtest.py / local_backtest_qc_port.py docstrings. Kept here
+unmodified for reference/history. Not maintained, not run in CI.
+============================================================================
+
 Third-round sweep: push REGIME_SMA_PERIOD further out (the second-round
 sweep showed net profit monotonically improving as the regime SMA lengthened:
 0 -> -51.4%, 50 -> -50.5%, 100 -> -43.0%, 200 -> -36.6%, 400 -> -33.7%), and

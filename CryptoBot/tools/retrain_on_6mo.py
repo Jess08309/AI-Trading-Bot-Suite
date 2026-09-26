@@ -1,6 +1,8 @@
 """
-Retrain the ML model on the full 6-month 1-minute candle dataset.
-Reads per-symbol CSVs directly (avoids loading 158MB unified CSV into memory).
+Retrain the ML model on 1-minute candle data (spot only -- the feature set is
+price-action-only and asset-class agnostic, so a single spot-trained model is
+used for both the spot and futures backtest legs).
+Reads per-symbol CSVs directly (avoids loading a giant unified CSV into memory).
 
 This produces a much stronger model than the current one because:
   - 10-50x more training samples (millions vs hundreds of thousands)
@@ -8,16 +10,40 @@ This produces a much stronger model than the current one because:
   - All 15 technical indicator features
   - GradientBoosting with TimeSeriesSplit (no look-ahead bias)
 
+GATE-MODEL FREEZE: by default this trains on data/historical/1min/ (the same
+6-month window the baseline backtest replays) -- fine for producing a strong
+*production* model, but WRONG for the baseline gate: a model trained and
+tested on the identical window has seen the test window's outcomes during
+training (look-ahead leakage), and cannot be used to validate whether the
+lab reproduces genuinely out-of-sample live behavior.
+
+To produce a frozen, leakage-free GATE model instead, point this at a
+strictly-earlier data directory and/or pass --end-date:
+    python tools/download_pretrain_window.py --end <window_start_iso> --days 60
+    python tools/retrain_on_6mo.py \\
+        --data-dir data/historical/1min_pretrain \\
+        --end-date <window_start_iso> \\
+        --output data/models/market_model_frozen.joblib
+
+--end-date is enforced even when pointed at the normal 6-month dir, as a
+defense-in-depth check -- any row at/after the cutoff is dropped before
+feature extraction.
+
 Usage:
     python tools/retrain_on_6mo.py
+    python tools/retrain_on_6mo.py --data-dir data/historical/1min_pretrain \\
+        --end-date 2026-03-29T00:00:00+00:00 --output data/models/market_model_frozen.joblib
 """
 
+import argparse
 import os
 import sys
 import csv
+import json
 import time
 import glob
 import numpy as np
+from datetime import datetime, timezone
 
 # Add project root to path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
@@ -39,17 +65,25 @@ PREDICTION_HORIZON = 5 # How many candles ahead to predict
 SAMPLE_EVERY = 5       # Sample every Nth candle (reduces data size while preserving diversity)
 
 
-def load_symbol_prices(filepath: str) -> list:
-    """Load close prices from a per-symbol 1-min CSV."""
-    prices = []
+def load_symbol_prices(filepath: str, end_cutoff_ts: int = None) -> list:
+    """Load close prices from a per-symbol 1-min CSV, oldest first.
+
+    If end_cutoff_ts is given, rows with timestamp >= cutoff are dropped
+    (defense-in-depth against the gate model ever seeing in-window data).
+    """
+    rows = []
     with open(filepath, 'r') as f:
         reader = csv.DictReader(f)
         for row in reader:
             try:
-                prices.append(float(row["close"]))
+                ts = int(row["timestamp"])
+                if end_cutoff_ts is not None and ts >= end_cutoff_ts:
+                    continue
+                rows.append((ts, float(row["close"])))
             except (ValueError, KeyError):
                 continue
-    return prices
+    rows.sort(key=lambda r: r[0])
+    return rows
 
 
 def build_features_for_symbol(prices: list, symbol: str,
@@ -95,21 +129,28 @@ def build_features_for_symbol(prices: list, symbol: str,
     return features, labels
 
 
-def retrain():
+def retrain(data_dir: str, model_path: str, end_date: str = None, meta_output: str = None):
     print("=" * 60)
-    print("RETRAIN ML MODEL ON 6-MONTH 1-MIN DATA")
+    print("RETRAIN ML MODEL")
     print("=" * 60)
     print()
 
-    files = sorted(glob.glob(os.path.join(DATA_DIR, "*_1min.csv")))
+    end_cutoff_ts = None
+    if end_date:
+        cutoff_dt = datetime.fromisoformat(end_date)
+        if cutoff_dt.tzinfo is None:
+            cutoff_dt = cutoff_dt.replace(tzinfo=timezone.utc)
+        end_cutoff_ts = int(cutoff_dt.timestamp())
+        print(f"End-date cutoff: {cutoff_dt.isoformat()} (rows at/after this are dropped)")
+
+    files = sorted(glob.glob(os.path.join(data_dir, "*_1min.csv")))
     if not files:
-        print(f"No data files in {DATA_DIR}")
-        print("Run tools/download_6mo_candles.py first!")
+        print(f"No data files in {data_dir}")
         return
 
-    print(f"Data dir:     {DATA_DIR}")
+    print(f"Data dir:     {data_dir}")
     print(f"Symbol files: {len(files)}")
-    print(f"Model output: {MODEL_PATH}")
+    print(f"Model output: {model_path}")
     print(f"Features:     {len(FEATURE_NAMES)}")
     print(f"Sample every: {SAMPLE_EVERY} candles")
     print()
@@ -117,17 +158,26 @@ def retrain():
     # Phase 1: Build features from all symbols
     all_features = []
     all_labels = []
+    symbols_used = []
+    min_ts = None
+    max_ts = None
     start = time.time()
 
     for filepath in files:
         symbol = os.path.basename(filepath).replace("_1min.csv", "")
         print(f"  Processing {symbol}...", end=" ", flush=True)
 
-        prices = load_symbol_prices(filepath)
+        rows = load_symbol_prices(filepath, end_cutoff_ts)
+        if rows:
+            min_ts = rows[0][0] if min_ts is None else min(min_ts, rows[0][0])
+            max_ts = rows[-1][0] if max_ts is None else max(max_ts, rows[-1][0])
+        prices = [r[1] for r in rows]
         features, labels = build_features_for_symbol(prices, symbol)
 
         all_features.extend(features)
         all_labels.extend(labels)
+        if features:
+            symbols_used.append(symbol)
         print(f"{len(features):,} samples")
 
     elapsed_features = time.time() - start
@@ -146,6 +196,10 @@ def retrain():
     print(f"  Total samples: {len(X):,}")
     print(f"  Class balance: {pos_ratio:.1%} UP / {1-pos_ratio:.1%} DOWN")
     print(f"  Features per sample: {X.shape[1]}")
+    if min_ts and max_ts:
+        print(f"  Actual data range used: "
+              f"{datetime.fromtimestamp(min_ts, tz=timezone.utc).isoformat()} -> "
+              f"{datetime.fromtimestamp(max_ts, tz=timezone.utc).isoformat()}")
     print()
 
     # Phase 2: Train GradientBoosting with TimeSeriesSplit
@@ -193,13 +247,13 @@ def retrain():
 
     # Phase 3: Save model
     print("[3/3] Saving model...")
-    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
 
     # Version backup
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    version_path = MODEL_PATH.replace(".joblib", f"_{timestamp}_acc{best_score:.0%}.joblib")
+    version_path = model_path.replace(".joblib", f"_{timestamp}_acc{best_score:.0%}.joblib")
     dump(best_model, version_path)
-    dump(best_model, MODEL_PATH)
+    dump(best_model, model_path)
 
     # Feature importances
     importances = best_model.feature_importances_
@@ -211,14 +265,39 @@ def retrain():
         print(f"    {name:20s} {imp:.4f} {bar}")
 
     print()
-    print(f"  Model saved: {MODEL_PATH}")
+    print(f"  Model saved: {model_path}")
     print(f"  Backup:      {version_path}")
+
+    meta = {
+        "model_path": model_path,
+        "trained_at": datetime.now(timezone.utc).isoformat(),
+        "data_dir": data_dir,
+        "end_date_cutoff": end_date,
+        "actual_data_start": datetime.fromtimestamp(min_ts, tz=timezone.utc).isoformat() if min_ts else None,
+        "actual_data_end": datetime.fromtimestamp(max_ts, tz=timezone.utc).isoformat() if max_ts else None,
+        "num_samples": int(len(X)),
+        "symbols": symbols_used,
+        "cv_accuracy": float(avg_score),
+        "best_fold_accuracy": float(best_score),
+    }
+    meta_path = meta_output or model_path.replace(".joblib", "_training_meta.json")
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"  Training metadata: {meta_path}")
     print()
-    print("  To use in the live bot: restart the bot (it auto-loads the model)")
-    print()
+
     total_elapsed = elapsed_features + elapsed_train
     print(f"  Total time: {total_elapsed:.0f}s ({total_elapsed/60:.1f} min)")
 
 
 if __name__ == "__main__":
-    retrain()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data-dir", default=DATA_DIR,
+                         help="Directory of per-symbol *_1min.csv files to train on")
+    parser.add_argument("--output", default=MODEL_PATH, help="Where to save the trained model")
+    parser.add_argument("--end-date", default=None,
+                         help="ISO timestamp: rows at/after this are excluded (gate-model freeze)")
+    parser.add_argument("--meta-output", default=None,
+                         help="Where to save training metadata JSON (default: alongside --output)")
+    args = parser.parse_args()
+    retrain(args.data_dir, args.output, args.end_date, args.meta_output)

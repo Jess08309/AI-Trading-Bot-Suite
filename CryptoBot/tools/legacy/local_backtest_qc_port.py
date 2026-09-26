@@ -1,4 +1,22 @@
 """
+ARCHIVED (backtest consolidation, see CryptoBot/backtest/README.md).
+
+Reason: rules-only mirror of CryptoBot/quantconnect/main.py's
+CryptoBotMomentumAlgorithm, SPOT-LONG-ONLY (no short side without Kraken
+futures data), unrelated to the live ML/ensemble bot. Closed investigation
+line, documented in its own docstring below: best tuned result -15.5% net
+over 2021-2026 -- still a net loser. This is a real, load-bearing finding
+(a rules-only strategy has no edge here), but not something to keep running
+routinely. Also depends on cached Alpaca hourly bars in
+data/backtest_cache/, which do not exist on the droplet.
+
+Superseded (for spot backtesting going forward) by
+cryptotrades/utils/backtester.py's SpotBacktester, which is genuinely
+live-config-integrated and driven via CryptoBot/backtest/run_baseline.py.
+optimize_backtest*.py (archived alongside this file) all import from here.
+Kept here unmodified for reference/history. Not maintained, not run in CI.
+============================================================================
+
 Local backtest of CryptoBot's rules-only QC port logic, using REAL historical
 hourly crypto bars pulled for free from Alpaca's market-data API (same
 credentials the live spot bot already uses) instead of QuantConnect's cloud

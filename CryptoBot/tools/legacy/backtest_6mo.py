@@ -1,4 +1,21 @@
 """
+ARCHIVED (backtest consolidation, see CryptoBot/backtest/README.md).
+
+Reason: full standalone reimplementation of the live entry/exit logic that
+does NOT import cryptotrades.core.trading_engine (duplicates it by hand
+instead, with comments like "Mirrors the EXACT v5 signal & exit logic" that
+have drifted over multiple v5/v6/v9/v10/v11 revisions). Also has stale
+Windows dev paths (c:\\Bot) in its docstring, and its --futures mode uses
+FUTURES_TO_SPOT to proxy Kraken futures P&L off of SPOT close prices
+(no real futures OHLC), which materially misrepresents funding cost and
+futures-specific price action.
+
+Superseded by cryptotrades/utils/backtester.py's SpotBacktester/
+FuturesBacktester, which are driven via CryptoBot/backtest/run_baseline.py
+using real downloaded Kraken futures 1-min data. Kept here unmodified for
+reference/history. Not maintained, not run in CI.
+============================================================================
+
 6-Month Walk-Forward Backtest
 =============================
 Uses the 6-month 1-minute candle data already downloaded in data/historical/1min/

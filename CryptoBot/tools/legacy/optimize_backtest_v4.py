@@ -1,4 +1,14 @@
 """
+ARCHIVED (backtest consolidation, see CryptoBot/backtest/README.md).
+
+Reason: round-4 (final) sweep on top of local_backtest_qc_port.py's
+rules-only strategy (archived alongside this file). Closed investigation --
+a rules-only mechanical strategy without CryptoBot's live ML confidence gate
+does not have a positive edge on this data, no matter how it's tuned (best
+found here: -15.5% net over 2021-2026, still a net loser). Kept here
+unmodified for reference/history. Not maintained, not run in CI.
+============================================================================
+
 Fourth-round sweep: push REGIME_SMA_PERIOD even further (1000 was still the
 best in round 3, -28.46% net) to see if the trend continues, plateaus, or
 reverses. Fixed at the round-3 winning entry/exit combo.

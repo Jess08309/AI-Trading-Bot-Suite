@@ -1,4 +1,12 @@
 """
+ARCHIVED (backtest consolidation, see CryptoBot/backtest/README.md).
+
+Reason: round-2 sweep on top of local_backtest_qc_port.py's rules-only
+strategy (archived alongside this file). Closed investigation -- see
+optimize_backtest.py / local_backtest_qc_port.py docstrings. Kept here
+unmodified for reference/history. Not maintained, not run in CI.
+============================================================================
+
 Second-round sweep: adds the optional REGIME_SMA_PERIOD filter (price above
 a longer SMA, to avoid buying momentum blips inside a broader downtrend) on
 top of the best entry/exit combo found by the first optimize_backtest.py
