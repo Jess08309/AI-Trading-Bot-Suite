@@ -69,10 +69,17 @@ Config G (GAMMA-SCALP, optional -- only runs when --configs includes "G"):
   only puts in a downtrend -- flat/no-trend allows either), 1-7 DTE options
   (entry DTE fixed at 7, the top of the stated range, so there is room left
   before the 3-DTE hard exit -- documented assumption since a closes-only
-  backtest can't select from a real listed-expiration chain). Exit rules
-  are Config-G-specific (NOT the shared A/B/C/D stop-loss/take-profit/
-  trailing-stop constants): stop-loss -40%, take-profit +75%, a theta
-  stop (exits once cumulative P&L% <= -4% * days_held -- a scaling-
+  backtest can't select from a real listed-expiration chain). ATM strikes
+  (0% ITM/OTM offset, NOT the 5%-ITM convention shared by A/B/C/D) --
+  switched from the initial ITM reuse after discovering 2% position sizing
+  combined with a 5%-ITM strike made every symbol except NVDA unaffordable
+  (a single contract's baked-in intrinsic value alone exceeded the $1,000
+  budget on a $50k account for SPY/QQQ/AAPL/MSFT); ATM is also the more
+  correct convention for gamma scalping anyway (maximum gamma sits at the
+  money, whereas deep ITM has more intrinsic value and less convexity).
+  Exit rules are Config-G-specific (NOT the shared A/B/C/D stop-loss/take-
+  profit/trailing-stop constants): stop-loss -40%, take-profit +75%, a
+  theta stop (exits once cumulative P&L% <= -4% * days_held -- a scaling-
   allowance proxy for "losing value faster than acceptable time decay",
   since isolating theta from delta P&L isn't possible with a single BS
   price per bar), and a hard exit at 3 DTE remaining. Trailing-stop and
@@ -90,13 +97,13 @@ Config G (GAMMA-SCALP, optional -- only runs when --configs includes "G"):
 
 All configs share: universe, date range, and the Black-Scholes pricing/
 IV-estimation -- only bar timeframe, indicator set, trend filter, DTE,
-exit rules, and position sizing differ per-config (the intentional
-experiment variables, each documented above). Universe is SPY/QQQ/AAPL/
-MSFT/NVDA per the task spec; note core/scanner.py's SCANNER_UNIVERSE
-comment block documents SPY/QQQ/MSFT as historically-eliminated DROP
-symbols (unprofitable, excluded from the live scanner's real universe) --
-kept here anyway since the task explicitly requires this universe for
-controlled comparison.
+exit rules, strike selection, and position sizing differ per-config (the
+intentional experiment variables, each documented above). Universe is
+SPY/QQQ/AAPL/MSFT/NVDA per the task spec; note core/scanner.py's
+SCANNER_UNIVERSE comment block documents SPY/QQQ/MSFT as historically-
+eliminated DROP symbols (unprofitable, excluded from the live scanner's
+real universe) -- kept here anyway since the task explicitly requires this
+universe for controlled comparison.
 
 IMPORTANT (fixed 2026-09-27): resample_intraday() now does real calendar-
 time resampling (pandas .resample() on a DatetimeIndex) instead of an
@@ -172,7 +179,7 @@ MODE_LABELS = {
     "B_scalp": "B: SCALP-TUNED (2-min, 4-ind, 15m trend filter)",
     "C_swing": "C: SWING-TUNED (1-hour, 4-ind, daily trend filter)",
     "D_ml_hybrid": "D: ML HYBRID (1-hour, GBM classifier, daily trend filter)",
-    "G_gamma_scalp": "G: GAMMA-SCALP (5-min, 1-7 DTE, IV<40pct, 2% risk)",
+    "G_gamma_scalp": "G: GAMMA-SCALP (5-min, 1-7 DTE, ATM, IV<40pct, 2% risk)",
 }
 
 
@@ -207,7 +214,8 @@ def select_strike(S, direction, itm_pct=TARGET_ITM_PCT):
     """Single-strike ITM-target simplification (mirrors options_handler.py's
     TARGET_ITM_PCT concept -- no real chain data available in a closes-only
     backtest, same class of simplification backtest_mtf.py already uses for
-    its own OTM strike selection)."""
+    its own OTM strike selection). itm_pct=0.0 gives an ATM strike (used by
+    Config G)."""
     offset = S * itm_pct
     if direction == "call":
         return round(S - offset, 2)
@@ -682,9 +690,10 @@ def align_index_before(primary_ts, trend_ts, i, buffer_minutes):
 #  Same architecture as backtest_mtf.py::run_single_backtest (mark-to-
 #  market -> exits in priority order -> circuit breakers -> signal
 #  generation -> price + size + open), generalized over bar timeframe /
-#  indicator set / trend filter / DTE / exit rules / sizing / entry filter
-#  rather than hardcoded per-mode. All new optional parameters default to
-#  the shared module constants so Configs A/B/C/D are completely unaffected.
+#  indicator set / trend filter / DTE / exit rules / sizing / strike
+#  selection / entry filter rather than hardcoded per-mode. All new
+#  optional parameters default to the shared module constants so Configs
+#  A/B/C/D are completely unaffected.
 # =============================================================
 
 def run_config(name, price, bars_per_day, lookback, signal_fn, dte_fn,
@@ -694,7 +703,8 @@ def run_config(name, price, bars_per_day, lookback, signal_fn, dte_fn,
                 stop_loss=None, take_profit=None, trailing_stop=None,
                 trailing_trigger=None, enable_trailing_stop=True,
                 dte_exit_buffer_days=None, theta_stop_pct_per_day=None,
-                max_position_pct=None, entry_filter_fn=None):
+                max_position_pct=None, entry_filter_fn=None,
+                strike_itm_pct=None):
     """
     price: {symbol: {"close": np.ndarray, "ts": np.ndarray[datetime64]}}
     trend: {symbol: {"close": np.ndarray, "ts": np.ndarray[datetime64]}} or None
@@ -714,6 +724,8 @@ def run_config(name, price, bars_per_day, lookback, signal_fn, dte_fn,
     entry_filter_fn: optional callable(sym, bar_idx) -> bool, checked after
         the signal+trend filters and before the ML gate/pricing. Return
         False to skip this entry (used by Config G's IV-percentile filter).
+    strike_itm_pct: overrides TARGET_ITM_PCT for this run's strike selection
+        (None = use the module default; Config G passes 0.0 for ATM).
     """
     syms = symbols if symbols is not None else SYMBOLS
     sl = STOP_LOSS if stop_loss is None else stop_loss
@@ -722,6 +734,7 @@ def run_config(name, price, bars_per_day, lookback, signal_fn, dte_fn,
     tt_pct = TRAILING_TRIGGER if trailing_trigger is None else trailing_trigger
     dte_buf = DTE_EXIT_BUFFER_DAYS if dte_exit_buffer_days is None else dte_exit_buffer_days
     pos_pct = MAX_POSITION_PCT if max_position_pct is None else max_position_pct
+    itm_pct = TARGET_ITM_PCT if strike_itm_pct is None else strike_itm_pct
 
     max_bars = max(len(p["close"]) for p in price.values())
     warmup = lookback + 5
@@ -855,7 +868,7 @@ def run_config(name, price, bars_per_day, lookback, signal_fn, dte_fn,
 
             S = closes[bar_idx]
             iv = estimate_iv(closes[:bar_idx + 1], bars_per_day=bars_per_day)
-            K = select_strike(S, direction)
+            K = select_strike(S, direction, itm_pct=itm_pct)
             dte = dte_fn(sym)
             T = dte / 365.0
             premium = bs_price(S, K, T, iv, direction)
@@ -1166,7 +1179,7 @@ def main():
         iv_filter = make_iv_percentile_filter(iv_series_by_symbol)
 
         print("\n" + "=" * 78)
-        print("  Running Config G: GAMMA-SCALP (5-min, 1-7 DTE, IV<40pct, 2% risk)")
+        print("  Running Config G: GAMMA-SCALP (5-min, 1-7 DTE, ATM, IV<40pct, 2% risk)")
         print("=" * 78)
         results.append(run_config(
             "G_gamma_scalp", data_5min, bars_per_day=78, lookback=50,
@@ -1179,6 +1192,7 @@ def main():
             enable_trailing_stop=False,
             dte_exit_buffer_days=3.0, theta_stop_pct_per_day=0.04,
             max_position_pct=0.02, entry_filter_fn=iv_filter,
+            strike_itm_pct=0.0,
         ))
 
     for r in results:
