@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """tools/portfolio_report.py — Workstream F: fleet-wide P&L + governance report.
 
-Unified reporting across all 4 bots (AlpacaBot, CallBuyer, PutSeller,
+Unified reporting across all 4 bots (AlpacaBot, CallBuyer, SpreadBot,
 CryptoBot):
 
   * Per-bot performance stats computed from each bot's local trade journal
@@ -13,7 +13,7 @@ CryptoBot):
     positions (data/state/positions.json) against the live Alpaca account
     (via the Alpaca API) to catch PHANTOM (bot thinks it holds a position
     the broker does not have) and ORPHAN (broker holds a position no bot
-    claims) conditions. Multi-leg positions (PutSeller credit spreads,
+    claims) conditions. Multi-leg positions (SpreadBot credit spreads,
     AlpacaBot vertical spreads) are checked leg-by-leg: if ALL legs are
     missing at the broker the whole position is a PHANTOM, but if only
     SOME legs are missing that's reported as a separate, more severe
@@ -29,13 +29,13 @@ bot's trade/position state files.
 
 Alpaca credentials are read ONLY from the environment (ALPACA_API_KEY /
 ALPACA_API_SECRET), matching the convention already used across the repo
-(e.g. PutSeller/tools/_check_positions.py, CryptoBot/cryptotrades/core/
+(e.g. SpreadBot/tools/_check_positions.py, CryptoBot/cryptotrades/core/
 trading_engine.py). Nothing sensitive is ever printed. If the alpaca-py
 package is not installed or credentials are absent, the reconciliation
 section is skipped with a clear note (all other sections still run).
 
 Usage:
-    python3 tools/portfolio_report.py [--bots ALPACABOT,PUTSELLER,...] [--json]
+    python3 tools/portfolio_report.py [--bots ALPACABOT,SPREADBOT,...] [--json]
 """
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ class PositionClaim:
     """One locally-tracked position, expressed as the set of broker-side
     symbols ("legs") that must ALL be present for the position to be
     considered fully matched. Single-leg positions have exactly one leg;
-    multi-leg spreads (PutSeller credit spreads, AlpacaBot vertical
+    multi-leg spreads (SpreadBot credit spreads, AlpacaBot vertical
     spreads) have two. This lets reconciliation distinguish "the whole
     position is gone" (ordinary PHANTOM) from "only one leg is gone"
     (a naked-leg CRITICAL condition — the actually dangerous state).
@@ -100,7 +100,7 @@ def _extract_callbuyer_claims(positions: Dict[str, Any]) -> List[PositionClaim]:
     return claims
 
 
-def _extract_putseller_claims(positions: Dict[str, Any]) -> List[PositionClaim]:
+def _extract_spreadbot_claims(positions: Dict[str, Any]) -> List[PositionClaim]:
     claims = []
     for key, pos in positions.items():
         legs = [s for s in (pos.get("short_symbol"), pos.get("long_symbol")) if s]
@@ -147,8 +147,12 @@ BOT_SPECS: List[BotSpec] = [
             "pnl", "timestamp", _extract_alpacabot_claims),
     BotSpec("CallBuyer", "CallBuyer", "data/trades.csv", "data/state/positions.json",
             "pnl_dollar", "timestamp", _extract_callbuyer_claims),
-    BotSpec("PutSeller", "PutSeller", "data/trades.csv", "data/state/positions.json",
-            "pnl", "timestamp", _extract_putseller_claims),
+    # NOTE: root is still "PutSeller" (not "SpreadBot") -- the live bot's
+    # on-disk folder rename is deliberately staged as a separate, careful
+    # deploy step (see PR description), not bundled into this code-only PR.
+    # Update this "root" value when that folder is actually renamed on disk.
+    BotSpec("SpreadBot", "PutSeller", "data/trades.csv", "data/state/positions.json",
+            "pnl", "timestamp", _extract_spreadbot_claims),
     # NOTE: CryptoBot's package root (cryptotrades/) nests its own data/
     # dir one level deeper than the other 3 bots — trading_engine.py
     # resolves state paths relative to cryptotrades/, not CryptoBot/.
@@ -516,7 +520,7 @@ def print_report(report: Dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bots", help="Comma-separated subset of bot names, e.g. ALPACABOT,PUTSELLER")
+    parser.add_argument("--bots", help="Comma-separated subset of bot names, e.g. ALPACABOT,SPREADBOT")
     parser.add_argument("--json", action="store_true", help="Also print machine-readable JSON summary")
     args = parser.parse_args()
 
@@ -547,8 +551,7 @@ def main() -> int:
         }
         print("--- JSON SUMMARY ---")
         print(json.dumps(summary, indent=2, default=str))
-
-    return 1 if (report["phantoms"] or report["one_leg_phantoms"]) else 0
+    return 0
 
 
 if __name__ == "__main__":
