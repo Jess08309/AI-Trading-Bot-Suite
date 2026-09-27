@@ -62,16 +62,11 @@ retired_units=(putseller spreadbot alpacabot callbuyer)
 for svc in "${retired_units[@]}"; do
     unit="${svc}.service"
     systemctl disable --now "$unit" 2>/dev/null || true
-    rm -f "/etc/systemd/system/${unit}" "/lib/systemd/system/${unit}"
+    rm -f "/etc/systemd/system/${unit}" "/lib/systemd/system/${unit}" "/usr/lib/systemd/system/${unit}"
     rm -f /etc/systemd/system/*.wants/"${unit}" /etc/systemd/system/*.requires/"${unit}"
 done
 systemctl daemon-reload
 
-# Keep deployment assets aligned with single-bot runtime
-rm -f "${BOT_HOME}/AI-Trading-Bot-Suite/CryptoBot/deploy/oracle/putseller.service" \
-      "${BOT_HOME}/AI-Trading-Bot-Suite/CryptoBot/deploy/oracle/spreadbot.service" \
-      "${BOT_HOME}/AI-Trading-Bot-Suite/CryptoBot/deploy/oracle/alpacabot.service" \
-      "${BOT_HOME}/AI-Trading-Bot-Suite/CryptoBot/deploy/oracle/callbuyer.service"
 
 # --- Create virtual environment & install deps ---
 echo "[6/8] Setting up Python virtual environment..."
