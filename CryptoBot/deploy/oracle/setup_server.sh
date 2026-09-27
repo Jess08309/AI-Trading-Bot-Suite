@@ -60,14 +60,16 @@ CLONE_SCRIPT
 echo "[5/8] Cleaning up retired bot services..."
 retired_units=(putseller spreadbot alpacabot callbuyer)
 for svc in "${retired_units[@]}"; do
-    unit="${svc}.service"
-    systemctl disable --now "$unit" 2>/dev/null || true
-    rm -f "/etc/systemd/system/${unit}" "/lib/systemd/system/${unit}" "/usr/lib/systemd/system/${unit}"
-    for link_dir in /etc/systemd/system/*.wants /etc/systemd/system/*.requires; do
-        [ -d "$link_dir" ] || continue
-        rm -f "$link_dir/$unit"
+    for ext in service timer; do
+        unit="${svc}.${ext}"
+        systemctl disable --now "$unit" 2>/dev/null || true
+        rm -f "/etc/systemd/system/${unit}" "/lib/systemd/system/${unit}" "/usr/lib/systemd/system/${unit}"
+        for link_dir in /etc/systemd/system/*.wants /etc/systemd/system/*.requires; do
+            [ -d "$link_dir" ] || continue
+            rm -f "$link_dir/$unit"
+        done
+        systemctl reset-failed "$unit" 2>/dev/null || true
     done
-    systemctl reset-failed "$unit" 2>/dev/null || true
 done
 systemctl daemon-reload
 
