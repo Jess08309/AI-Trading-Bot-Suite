@@ -27,7 +27,7 @@ check_and_restart() {
 }
 
 # Check each bot
-for svc in cryptobot putseller callbuyer alpacabot; do
+for svc in cryptobot; do
     check_and_restart "$svc"
 done
 

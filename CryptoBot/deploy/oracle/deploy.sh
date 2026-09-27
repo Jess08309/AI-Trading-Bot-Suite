@@ -58,9 +58,6 @@ $SSH "${BOT_USER}@${SERVER_IP}" 'cd ~/AI-Trading-Bot-Suite && git pull --ff-only
 log "Syncing .env files..."
 
 declare -A ENV_FILES=(
-    ["${REPO_ROOT}/AlpacaBot/.env"]="AI-Trading-Bot-Suite/AlpacaBot/.env"
-    ["${REPO_ROOT}/PutSeller/.env"]="AI-Trading-Bot-Suite/PutSeller/.env"
-    ["${REPO_ROOT}/CallBuyer/.env"]="AI-Trading-Bot-Suite/CallBuyer/.env"
     ["${REPO_ROOT}/CryptoBot/cryptotrades/.env"]="AI-Trading-Bot-Suite/CryptoBot/cryptotrades/.env"
 )
 
@@ -81,10 +78,6 @@ if [ "$SYNC_STATE" = true ]; then
     declare -A STATE_FILES=(
         ["${REPO_ROOT}/CryptoBot/cryptotrades/data/state/paper_balances.json"]="AI-Trading-Bot-Suite/CryptoBot/cryptotrades/data/state/"
         ["${REPO_ROOT}/CryptoBot/cryptotrades/data/state/locked_profile.json"]="AI-Trading-Bot-Suite/CryptoBot/cryptotrades/data/state/"
-        ["${REPO_ROOT}/PutSeller/data/state/positions.json"]="AI-Trading-Bot-Suite/PutSeller/data/state/"
-        ["${REPO_ROOT}/PutSeller/data/state/bot_state.json"]="AI-Trading-Bot-Suite/PutSeller/data/state/"
-        ["${REPO_ROOT}/CallBuyer/data/state/bot_state.json"]="AI-Trading-Bot-Suite/CallBuyer/data/state/"
-        ["${REPO_ROOT}/AlpacaBot/data/state/bot_state.json"]="AI-Trading-Bot-Suite/AlpacaBot/data/state/"
     )
 
     for src in "${!STATE_FILES[@]}"; do
@@ -116,9 +109,9 @@ fi
 #  5. Restart services
 # ---------------------------------------------------------------------------
 log "Restarting bot services..."
-$SSH "${BOT_USER}@${SERVER_IP}" 'sudo systemctl restart cryptobot putseller callbuyer alpacabot; sudo systemctl start bot-watchdog.timer'
+$SSH "${BOT_USER}@${SERVER_IP}" 'sudo systemctl restart cryptobot; sudo systemctl start bot-watchdog.timer'
 
 log "Checking status..."
-$SSH "${BOT_USER}@${SERVER_IP}" 'for s in cryptobot putseller callbuyer alpacabot; do printf "%-12s %s\n" "$s" "$(systemctl is-active "$s")"; done'
+$SSH "${BOT_USER}@${SERVER_IP}" 'for s in cryptobot; do printf "%-12s %s\n" "$s" "$(systemctl is-active "$s")"; done'
 
 log "Deploy complete!"

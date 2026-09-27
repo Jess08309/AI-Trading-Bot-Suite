@@ -45,9 +45,6 @@ Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'cd ~/AI-Trading-Bot-Suite && gi
 Log "Syncing .env files..."
 
 $envFiles = @(
-    @("$RepoRoot\AlpacaBot\.env",               "AI-Trading-Bot-Suite/AlpacaBot/.env"),
-    @("$RepoRoot\PutSeller\.env",               "AI-Trading-Bot-Suite/PutSeller/.env"),
-    @("$RepoRoot\CallBuyer\.env",                "AI-Trading-Bot-Suite/CallBuyer/.env"),
     @("$RepoRoot\CryptoBot\cryptotrades\.env",  "AI-Trading-Bot-Suite/CryptoBot/cryptotrades/.env")
 )
 
@@ -68,11 +65,7 @@ if ($SyncState) {
 
     $stateFiles = @(
         @("$RepoRoot\CryptoBot\cryptotrades\data\state\paper_balances.json", "AI-Trading-Bot-Suite/CryptoBot/cryptotrades/data/state/"),
-        @("$RepoRoot\CryptoBot\cryptotrades\data\state\locked_profile.json", "AI-Trading-Bot-Suite/CryptoBot/cryptotrades/data/state/"),
-        @("$RepoRoot\PutSeller\data\state\positions.json",                  "AI-Trading-Bot-Suite/PutSeller/data/state/"),
-        @("$RepoRoot\PutSeller\data\state\bot_state.json",                  "AI-Trading-Bot-Suite/PutSeller/data/state/"),
-        @("$RepoRoot\CallBuyer\data\state\bot_state.json",                  "AI-Trading-Bot-Suite/CallBuyer/data/state/"),
-        @("$RepoRoot\AlpacaBot\data\state\bot_state.json",                  "AI-Trading-Bot-Suite/AlpacaBot/data/state/")
+        @("$RepoRoot\CryptoBot\cryptotrades\data\state\locked_profile.json", "AI-Trading-Bot-Suite/CryptoBot/cryptotrades/data/state/")
     )
 
     foreach ($pair in $stateFiles) {
@@ -106,9 +99,9 @@ if ($FirstDeploy) {
 #  5. Restart services
 # ---------------------------------------------------------------------------
 Log "Restarting bot services..."
-Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'sudo systemctl restart cryptobot putseller callbuyer alpacabot 2>&1; sudo systemctl start bot-watchdog.timer 2>&1'"
+Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'sudo systemctl restart cryptobot 2>&1; sudo systemctl start bot-watchdog.timer 2>&1'"
 
 Log "Checking status..."
-Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'for s in cryptobot putseller callbuyer alpacabot; do printf ""%-12s %s\n"" `$s `$(systemctl is-active `$s); done'"
+Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'for s in cryptobot; do printf ""%-12s %s\n"" `$s `$(systemctl is-active `$s); done'"
 
 Log "Deploy complete!"
