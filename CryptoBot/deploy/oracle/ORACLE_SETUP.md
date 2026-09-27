@@ -1,8 +1,8 @@
-# Oracle Cloud Free Tier — Bot Deployment Guide
+# Oracle Cloud Free Tier — CryptoBot Deployment Guide
 
 ## What You Get (Free Forever)
 - **ARM instance**: 4 OCPU (cores), 24 GB RAM, 200 GB disk
-- More than enough for all 4 bots (they use ~200MB RAM each)
+- More than enough for CryptoBot + watchdog
 - No credit card charges — truly free tier (card required for signup verification only)
 
 ---
@@ -11,7 +11,7 @@
 
 1. Go to **https://cloud.oracle.com/sign-up**
 2. Sign up with email, set a password
-3. **Home Region**: Choose `us-phoenix-1` or `us-ashburn-1` (closest to you in Sparks, NV — Phoenix is ~700 miles, Ashburn ~2,500)
+3. **Home Region**: Choose `us-phoenix-1` or `us-ashburn-1`
 4. Add a credit card for verification (you will NOT be charged)
 5. Wait for account activation (~5 minutes)
 
@@ -38,32 +38,13 @@ Get-Content "$env:USERPROFILE\.ssh\oracle_bot_key.pub" | Set-Clipboard
 ## Step 3: Create ARM Compute Instance
 
 1. Log into **https://cloud.oracle.com**
-2. Click **"Create a VM instance"** (or: Menu → Compute → Instances → Create Instance)
-
-3. **Name**: `trading-bots`
-
-4. **Image and shape**:
-   - Click **"Edit"** next to Shape
-   - Select **Ampere** tab → **VM.Standard.A1.Flex**
-   - Set: **4 OCPUs**, **24 GB RAM** (max free tier)
-   - Image: **Canonical Ubuntu 22.04** (or 24.04 if available)
-
-5. **Networking**:
-   - Use default VCN or create new
-   - **Assign a public IPv4 address**: YES
-   - Subnet: public subnet
-
-6. **Add SSH keys**:
-   - Select **"Paste public keys"**
-   - Paste the key you copied in Step 2
-
-7. Click **Create**
-
-8. Wait 2-5 minutes for RUNNING status
-9. **Copy the Public IP Address** shown on the instance page
-
-> **Note**: ARM free tier instances are in high demand. If you get "Out of capacity", 
-> try again in a few hours or try a different availability domain.
+2. Click **"Create a VM instance"**
+3. **Name**: `trading-bot`
+4. Use shape **VM.Standard.A1.Flex** with **4 OCPUs** and **24 GB RAM**
+5. Use Ubuntu 22.04 or 24.04 image
+6. Assign a public IPv4 address
+7. Paste your SSH public key
+8. Click **Create**, wait until running, copy the public IP
 
 ---
 
@@ -73,22 +54,16 @@ Get-Content "$env:USERPROFILE\.ssh\oracle_bot_key.pub" | Set-Clipboard
 ssh -i "$env:USERPROFILE\.ssh\oracle_bot_key" ubuntu@<YOUR_SERVER_IP>
 ```
 
-You should get a shell. Type `exit` to disconnect.
-
 ---
 
-## Step 5: Create botuser & Deploy
-
-From your Windows machine, SSH in and create the bot user:
+## Step 5: Create botuser
 
 ```powershell
-# SSH as ubuntu (the default user has sudo)
 ssh -i "$env:USERPROFILE\.ssh\oracle_bot_key" ubuntu@<YOUR_SERVER_IP>
 ```
 
 On the server:
 ```bash
-# Create botuser and allow SSH
 sudo useradd -m -s /bin/bash botuser
 sudo mkdir -p /home/botuser/.ssh
 sudo cp ~/.ssh/authorized_keys /home/botuser/.ssh/
@@ -98,14 +73,9 @@ sudo chmod 600 /home/botuser/.ssh/authorized_keys
 exit
 ```
 
-Test botuser login:
-```powershell
-ssh -i "$env:USERPROFILE\.ssh\oracle_bot_key" botuser@<YOUR_SERVER_IP>
-```
-
 ---
 
-## Step 6: Run the Deploy Script
+## Step 6: Run Deploy Script
 
 From **Windows** (PowerShell):
 ```powershell
@@ -113,32 +83,23 @@ cd C:\path\to\AI-Trading-Bot-Suite\CryptoBot\deploy\oracle
 .\deploy.ps1 -ServerIP <YOUR_SERVER_IP> -FirstDeploy -SyncState
 ```
 
-From **Linux/macOS/a GitHub Codespace** (bash) — use this if you're working from this
-repo's Codespace rather than a local Windows machine:
+From **Linux/macOS/Codespace**:
 ```bash
 cd /workspaces/AI-Trading-Bot-Suite/CryptoBot/deploy/oracle
 ./deploy.sh <YOUR_SERVER_IP> --first-deploy --sync-state
 ```
-Before running this, set up SSH access from the Codespace to the server: generate a key
-with `ssh-keygen -t ed25519 -f ~/.ssh/oracle_bot_key -N ""`, paste the `.pub` key into
-the Oracle instance's SSH keys (or add it to the server's `~/.ssh/authorized_keys` if the
-instance is already running), then re-run the script.
 
-Both scripts do the same thing:
-1. Push your latest code to GitHub (commits any uncommitted local changes first)
-2. Pull it on the server
-3. Copy .env files (API keys)
-4. Copy state files (positions, balances)
-5. Run setup_server.sh (install Python, create venvs, install deps, enable services)
-6. Start all bots
-
-> **Repo layout**: this is a single monorepo (`AI-Trading-Bot-Suite`) containing all 4
-> bots as subfolders. The server clones it once to `~/AI-Trading-Bot-Suite` — there are
-> no more separate per-bot repos.
+Deploy scripts:
+1. Push latest code to GitHub
+2. Pull latest on server
+3. Copy CryptoBot `.env`
+4. Copy CryptoBot state files (optional)
+5. Run `setup_server.sh`
+6. Restart `cryptobot` and `bot-watchdog.timer`
 
 ---
 
-## Step 7: Verify Everything is Running
+## Step 7: Verify Runtime Services
 
 ```powershell
 ssh -i "$env:USERPROFILE\.ssh\oracle_bot_key" botuser@<YOUR_SERVER_IP>
@@ -146,75 +107,31 @@ ssh -i "$env:USERPROFILE\.ssh\oracle_bot_key" botuser@<YOUR_SERVER_IP>
 
 On the server:
 ```bash
-# Check service status
-sudo systemctl status cryptobot putseller callbuyer
-
-# Watch live logs
-journalctl -u cryptobot -f           # CryptoBot logs
-journalctl -u putseller -f           # PutSeller logs
-journalctl -u callbuyer -f           # CallBuyer logs
-
-# Check watchdog timer
+sudo systemctl status cryptobot
 sudo systemctl status bot-watchdog.timer
+journalctl -u cryptobot -f
+```
 
-# Check resource usage
-htop
+To verify retired services are gone:
+```bash
+for s in putseller spreadbot alpacabot callbuyer; do
+  echo "$s: $(systemctl is-enabled "$s" 2>/dev/null || echo not-installed)"
+done
 ```
 
 ---
 
 ## Day-to-Day Operations
 
-### Push code updates:
+Push updates:
 ```powershell
 .\deploy.ps1 -ServerIP <YOUR_SERVER_IP>
 ```
 
-### Pull code updates on server (without redeploying from your dev machine):
+Update directly on server:
 ```bash
 ~/deploy/update_bots.sh
 ```
-
-### Why this matters if you're running in a GitHub Codespace:
-Codespaces have a default 30-minute idle timeout and are stopped automatically when you
-disconnect — they are **not** a persistent host. Anything run only via `nohup`/background
-processes inside a Codespace stops when the Codespace stops. This Oracle Cloud VM (or any
-always-on server you deploy to via the scripts above) is what keeps the bots running when
-your laptop is off or asleep — the Codespace should only be used for development, not as
-the production host.
-
-### Stop/start individual bot:
-```bash
-sudo systemctl stop putseller
-sudo systemctl start putseller
-```
-
-### View recent logs:
-```bash
-journalctl -u cryptobot --since "1 hour ago"
-journalctl -u putseller --since today
-```
-
-### Check if bots survived a reboot:
-```bash
-# systemd auto-starts them on boot — just verify:
-for s in cryptobot putseller callbuyer; do
-    printf "%-12s %s\n" "$s" "$(systemctl is-active $s)"
-done
-```
-
----
-
-## Oracle Cloud Security Group (already configured)
-
-The bots only make **outbound** HTTPS connections (to Kraken, Alpaca APIs).
-No inbound ports are needed except SSH (port 22).
-
-The default Oracle security list allows:
-- **Inbound**: SSH (22) only
-- **Outbound**: All traffic
-
-This is exactly what we need. Don't open additional ports.
 
 ---
 
@@ -222,9 +139,6 @@ This is exactly what we need. Don't open additional ports.
 
 | Problem | Solution |
 |---------|----------|
-| "Out of capacity" on instance creation | Try different Availability Domain, or wait a few hours |
-| Bot crashes immediately | `journalctl -u cryptobot -n 50` to see error |
-| .env not found | Re-run `.\deploy.ps1 -ServerIP <IP>` (syncs .env files) |
-| pip install fails on ARM | All deps are pure Python — should work. Check `journalctl` for errors |
-| SSH connection refused | Check Oracle Security List allows port 22 from your IP |
-| Instance stopped by Oracle | Only if you have a paid account and run out of credits. Free tier instances run forever |
+| Bot crashes immediately | `journalctl -u cryptobot -n 50` |
+| .env not found | Re-run deploy script to sync `CryptoBot/cryptotrades/.env` |
+| SSH connection refused | Confirm Oracle security list allows port 22 |

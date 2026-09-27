@@ -6,15 +6,21 @@
 # ============================================================================
 set -euo pipefail
 
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    echo "This script must be run as root (use sudo)."
+    exit 1
+fi
+
 BOT_USER="botuser"
 BOT_HOME="/home/${BOT_USER}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "========================================="
 echo "  Trading Bot Server Setup (ARM/aarch64)"
 echo "========================================="
 
 # --- System packages ---
-echo "[1/7] Installing system packages..."
+echo "[1/8] Installing system packages..."
 apt-get update -qq
 apt-get install -y -qq \
     python3 python3-venv python3-dev python3-full \
@@ -24,7 +30,7 @@ PYTHON=$(command -v python3)
 echo "  Using Python: $PYTHON ($($PYTHON --version))"
 
 # --- Create bot user ---
-echo "[2/7] Creating bot user..."
+echo "[2/8] Creating bot user..."
 if ! id "$BOT_USER" &>/dev/null; then
     useradd -m -s /bin/bash "$BOT_USER"
     echo "  Created user: $BOT_USER"
@@ -33,7 +39,7 @@ else
 fi
 
 # --- Firewall (no inbound ports needed — bots only make outbound calls) ---
-echo "[3/7] Configuring firewall..."
+echo "[3/8] Configuring firewall..."
 ufw default deny incoming > /dev/null
 ufw default allow outgoing > /dev/null
 ufw allow ssh > /dev/null
@@ -41,7 +47,7 @@ ufw --force enable > /dev/null
 echo "  UFW: deny incoming, allow outgoing, allow SSH"
 
 # --- Clone repository ---
-echo "[4/7] Cloning bot repository (monorepo)..."
+echo "[4/8] Cloning bot repository (monorepo)..."
 sudo -u "$BOT_USER" bash <<'CLONE_SCRIPT'
 cd ~
 REPO_URL="https://github.com/Jess08309/AI-Trading-Bot-Suite.git"
@@ -56,58 +62,40 @@ else
 fi
 CLONE_SCRIPT
 
-# --- Create virtual environments & install deps ---
-echo "[5/7] Setting up Python virtual environments..."
+# --- Remove retired bot services if they still exist ---
+echo "[5/8] Cleaning up retired bot services..."
+"${SCRIPT_DIR}/cleanup_retired_units.sh"
+
+
+# --- Create virtual environment & install deps ---
+echo "[6/8] Setting up Python virtual environment..."
 PYTHON_PATH=$PYTHON
 sudo -u "$BOT_USER" bash <<VENV_SCRIPT
-cd ~/AI-Trading-Bot-Suite
-for BOT in CryptoBot PutSeller CallBuyer AlpacaBot; do
-    echo "  \$BOT: creating venv..."
-    cd ~/AI-Trading-Bot-Suite/\$BOT
-    $PYTHON_PATH -m venv .venv
-    source .venv/bin/activate
-    pip install --upgrade pip -q
-    if [ -f requirements.txt ]; then
-        pip install -r requirements.txt -q
-    fi
-    deactivate
-    cd ~/AI-Trading-Bot-Suite
-done
+cd ~/AI-Trading-Bot-Suite/CryptoBot
+echo "  CryptoBot: creating venv..."
+$PYTHON_PATH -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip -q
+if [ -f requirements.txt ]; then
+    pip install -r requirements.txt -q
+fi
+deactivate
 VENV_SCRIPT
 
 # --- Create required directories ---
-echo "[6/7] Creating data directories..."
+echo "[7/8] Creating data directories..."
 sudo -u "$BOT_USER" bash <<'DIR_SCRIPT'
-cd ~/AI-Trading-Bot-Suite
-
-# CryptoBot directories (runtime lives under cryptotrades/)
 mkdir -p ~/AI-Trading-Bot-Suite/CryptoBot/cryptotrades/logs
 mkdir -p ~/AI-Trading-Bot-Suite/CryptoBot/cryptotrades/data/state
 mkdir -p ~/AI-Trading-Bot-Suite/CryptoBot/cryptotrades/data/models
 mkdir -p ~/AI-Trading-Bot-Suite/CryptoBot/data/state
 mkdir -p ~/AI-Trading-Bot-Suite/CryptoBot/reports
-
-# PutSeller directories
-mkdir -p ~/AI-Trading-Bot-Suite/PutSeller/logs
-mkdir -p ~/AI-Trading-Bot-Suite/PutSeller/data/state
-mkdir -p ~/AI-Trading-Bot-Suite/PutSeller/reports
-
-# CallBuyer directories
-mkdir -p ~/AI-Trading-Bot-Suite/CallBuyer/logs
-mkdir -p ~/AI-Trading-Bot-Suite/CallBuyer/data/state
-mkdir -p ~/AI-Trading-Bot-Suite/CallBuyer/reports
-
-# AlpacaBot directories
-mkdir -p ~/AI-Trading-Bot-Suite/AlpacaBot/logs
-mkdir -p ~/AI-Trading-Bot-Suite/AlpacaBot/data/state
-mkdir -p ~/AI-Trading-Bot-Suite/AlpacaBot/reports
 DIR_SCRIPT
 
 # --- Install systemd services ---
-echo "[7/7] Installing systemd services..."
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+echo "[8/8] Installing systemd services..."
 
-for SVC in cryptobot putseller callbuyer alpacabot bot-watchdog; do
+for SVC in cryptobot bot-watchdog; do
     if [ -f "${SCRIPT_DIR}/${SVC}.service" ]; then
         cp "${SCRIPT_DIR}/${SVC}.service" /etc/systemd/system/
         echo "  Installed ${SVC}.service"
@@ -121,8 +109,8 @@ fi
 
 systemctl daemon-reload
 
-# Enable all services
-systemctl enable cryptobot putseller callbuyer alpacabot bot-watchdog.timer
+# Enable core service + watchdog timer
+systemctl enable cryptobot bot-watchdog.timer
 
 echo ""
 echo "========================================="
@@ -130,19 +118,16 @@ echo "  Setup complete!"
 echo "========================================="
 echo ""
 echo "NEXT STEPS:"
-echo "  1. Copy .env files to the server (run ./deploy.sh from the repo, or manually):"
-echo "     scp AlpacaBot/.env                   botuser@<IP>:~/AI-Trading-Bot-Suite/AlpacaBot/.env"
-echo "     scp PutSeller/.env                   botuser@<IP>:~/AI-Trading-Bot-Suite/PutSeller/.env"
-echo "     scp CallBuyer/.env                   botuser@<IP>:~/AI-Trading-Bot-Suite/CallBuyer/.env"
+echo "  1. Copy .env file to the server (run ./deploy.sh from the repo, or manually):"
 echo "     scp CryptoBot/cryptotrades/.env      botuser@<IP>:~/AI-Trading-Bot-Suite/CryptoBot/cryptotrades/.env"
 echo ""
-echo "  2. Copy state files (paper balances, positions, etc.) — use deploy.sh -SyncState"
+echo "  2. Copy state files (paper balances, positions, etc.) — use deploy.sh --sync-state"
 echo ""
-echo "  3. Start the bots:"
-echo "     sudo systemctl start cryptobot putseller callbuyer alpacabot"
+echo "  3. Start the bot:"
+echo "     sudo systemctl start cryptobot"
 echo "     sudo systemctl start bot-watchdog.timer"
 echo ""
 echo "  4. Check status:"
-echo "     sudo systemctl status cryptobot putseller callbuyer alpacabot"
+echo "     sudo systemctl status cryptobot"
 echo "     journalctl -u cryptobot -f   (live logs)"
 echo ""

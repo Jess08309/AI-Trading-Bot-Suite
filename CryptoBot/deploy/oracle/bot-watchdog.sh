@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-#  Bot Watchdog — checks all bot services are alive, restarts if dead
+#  Bot Watchdog — checks bot service is alive, restarts if dead
 #  Called by bot-watchdog.timer every 2 minutes
 # ============================================================================
 set -euo pipefail
@@ -14,7 +14,7 @@ check_and_restart() {
     local svc="$1"
     local enabled
     enabled=$(systemctl is-enabled "$svc" 2>/dev/null || echo "disabled")
-    
+
     if [ "$enabled" != "enabled" ]; then
         return 0  # Skip disabled services
     fi
@@ -26,13 +26,10 @@ check_and_restart() {
     fi
 }
 
-# Check each bot
-for svc in cryptobot putseller callbuyer alpacabot; do
-    check_and_restart "$svc"
-done
+check_and_restart "cryptobot"
 
 # Memory pressure check — log warning if high
 MEM_USED=$(free | awk '/Mem:/ {printf "%.0f", $3/$2 * 100}')
 if [ "$MEM_USED" -gt "$MAX_MEM_PCT" ]; then
-    log "WARNING: Memory usage at ${MEM_USED}% — consider restarting a bot"
+    log "WARNING: Memory usage at ${MEM_USED}% — consider restarting the bot"
 fi
