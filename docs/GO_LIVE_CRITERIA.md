@@ -1,19 +1,19 @@
 # Go-Live Criteria (DRAFT — for owner review)
 
-Status: **DRAFT**. This document defines the governance bar for the bot
-fleet (AlpacaBot, CallBuyer, PutSeller, CryptoBot). It is produced by
-Workstream F (portfolio/governance layer) and is intended for owner
-review and sign-off before any of the protocols below are enforced
-automatically.
+Status: **DRAFT**. This document defines the governance bar for CryptoBot,
+the sole bot in this repository as of the 2026-09-27 portfolio
+consolidation (PutSeller, CallBuyer, and AlpacaBot were retired and
+removed; see top-level README.md). It is intended for owner review and
+sign-off before any of the protocols below are enforced automatically.
 
 ## The Rule
 
 > A bot stays live only if:
 > **>= 100 closed trades** AND **profit factor > 1.3** AND
 > **win rate > 40%** AND **max drawdown < 10%**.
-> Bots failing get paused until they pass in the lab with margin.
+> A bot failing this gets paused until it passes in the lab with margin.
 
-The Rule is computed per bot by `tools/portfolio_report.py`, which is the
+The Rule is computed by `tools/portfolio_report.py`, which is the
 canonical, authoritative implementation of these four checks. Any change
 to the thresholds above must be mirrored in that script's `RULE_MIN_*` /
 `RULE_MAX_*` constants.
@@ -61,16 +61,15 @@ resume:
 ## Capital Plan
 
 - A bot that meets the go-live requirements above starts real-money
-  trading at **its current paper allocation percentage** of a **small**
-  real account (i.e. the same `ALLOCATION_PCT` used in paper is applied
-  to a deliberately small live account, not the full target book).
+  trading at a deliberately **small** real account, not the full target
+  book.
 - Capital is scaled up only after **4 more profitable weeks** live,
   re-evaluated against The Rule using live (not paper) trade data.
 - Any kill-criteria event (above) resets the capital plan: the bot
   returns to paper and must re-clear the full go-live bar before
   real capital is reconsidered.
 
-## Relationship to Other Workstream F Deliverables
+## Relationship to Other Governance Deliverables
 
 - `tools/portfolio_report.py` — computes The Rule scorecard and runs
   reconciliation; intended to run daily via
@@ -78,6 +77,4 @@ resume:
   market close). These units are included for review only and are
   **not** installed/enabled by this change.
 - Fleet-wide kill switch — implemented as a `/home/botuser/KILL_ALL`
-  file check in each bot's main loop; see the kill-switch section of the
-  Workstream F PR description for per-bot latency estimates and the
-  manual test evidence.
+  file check in CryptoBot's main loop.
