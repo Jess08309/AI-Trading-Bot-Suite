@@ -321,6 +321,10 @@ class TradingConfig:
             raise ValueError("FUTURES_LEVERAGE must be >= 1")
         if self.MAX_POSITIONS_PER_SYMBOL_SPOT < 1 or self.MAX_POSITIONS_PER_SYMBOL_FUTURES < 1:
             raise ValueError("Per-symbol position limits must be >= 1")
+        if self.SYMBOL_UNCONFIRMED_FILL_STRIKES < 1:
+            raise ValueError("SYMBOL_UNCONFIRMED_FILL_STRIKES must be >= 1")
+        if self.SYMBOL_UNCONFIRMED_FILL_COOLDOWN_HOURS <= 0:
+            raise ValueError("SYMBOL_UNCONFIRMED_FILL_COOLDOWN_HOURS must be > 0")
         if self.STALE_EXIT_PROFIT_ARM_PCT <= 0 or self.STALE_EXIT_DECAY_PCT <= 0:
             raise ValueError("Stale-exit profit arm and decay values must be > 0")
         if self.STALE_EXIT_STALE_MIN_SPOT <= 0 or self.STALE_EXIT_STALE_MIN_FUTURES <= 0:
@@ -2439,7 +2443,6 @@ class TradingBot:
                 pass  # best-effort — order may have already filled/expired
             return 0.0
         except Exception as e:
-            self._record_symbol_unconfirmed_fill(symbol, reason="submit_error")
             self.logger.error(f"ALPACA ORDER FAILED: BUY {symbol} notional=${notional:.2f}: {e}")
             return 0.0
 
@@ -2642,25 +2645,38 @@ class TradingBot:
             if os.path.exists(pause_state_path):
                 with open(pause_state_path, 'r') as f:
                     pause_state = json.load(f)
-                self.symbol_consecutive_losses = {
+                loaded_symbol_consecutive_losses = {
                     str(k): int(v)
                     for k, v in (pause_state.get("symbol_consecutive_losses", {}) or {}).items()
                 }
-                self.symbol_paused_until = {}
+                loaded_symbol_paused_until: Dict[str, datetime] = {}
                 for symbol, raw_until in (pause_state.get("symbol_paused_until", {}) or {}).items():
                     parsed = self._parse_datetime(raw_until)
                     if parsed is not None:
-                        self.symbol_paused_until[str(symbol)] = parsed
-                self.symbol_unconfirmed_fill_strikes = {
+                        loaded_symbol_paused_until[str(symbol)] = parsed
+                loaded_symbol_unconfirmed_fill_strikes = {
                     str(k): int(v)
                     for k, v in (pause_state.get("symbol_unconfirmed_fill_strikes", {}) or {}).items()
                 }
-                self.symbol_unconfirmed_fill_paused_until = {}
+                loaded_symbol_unconfirmed_fill_paused_until: Dict[str, datetime] = {}
                 for symbol, raw_until in (pause_state.get("symbol_unconfirmed_fill_paused_until", {}) or {}).items():
                     parsed = self._parse_datetime(raw_until)
                     if parsed is not None:
-                        self.symbol_unconfirmed_fill_paused_until[str(symbol)] = parsed
+                        loaded_symbol_unconfirmed_fill_paused_until[str(symbol)] = parsed
+                self.symbol_consecutive_losses = loaded_symbol_consecutive_losses
+                self.symbol_paused_until = loaded_symbol_paused_until
+                self.symbol_unconfirmed_fill_strikes = loaded_symbol_unconfirmed_fill_strikes
+                self.symbol_unconfirmed_fill_paused_until = loaded_symbol_unconfirmed_fill_paused_until
+            else:
+                self.symbol_consecutive_losses = {}
+                self.symbol_paused_until = {}
+                self.symbol_unconfirmed_fill_strikes = {}
+                self.symbol_unconfirmed_fill_paused_until = {}
         except Exception as e:
+            self.symbol_consecutive_losses = {}
+            self.symbol_paused_until = {}
+            self.symbol_unconfirmed_fill_strikes = {}
+            self.symbol_unconfirmed_fill_paused_until = {}
             self.logger.warning(f"Could not load symbol pause state: {e}")
 
         try:
@@ -3627,6 +3643,8 @@ class TradingBot:
             del self.symbol_unconfirmed_fill_paused_until[base_symbol]
             self.symbol_unconfirmed_fill_strikes[base_symbol] = 0
             self.logger.info(f"ENTRY RE-ENABLED: {base_symbol} unconfirmed-fill cooldown expired")
+            if hasattr(self, "_save_state"):
+                self._save_state()
         return False
 
     def _record_symbol_unconfirmed_fill(self, symbol: str, reason: str = "unconfirmed_fill"):
@@ -3639,6 +3657,9 @@ class TradingBot:
             f"{base_symbol} ({reason})"
         )
         if strikes >= cfg.SYMBOL_UNCONFIRMED_FILL_STRIKES:
+            existing_pause_until = self.symbol_unconfirmed_fill_paused_until.get(base_symbol)
+            if existing_pause_until and datetime.now() < existing_pause_until:
+                return
             pause_until = datetime.now() + timedelta(hours=cfg.SYMBOL_UNCONFIRMED_FILL_COOLDOWN_HOURS)
             self.symbol_unconfirmed_fill_paused_until[base_symbol] = pause_until
             self.logger.warning(

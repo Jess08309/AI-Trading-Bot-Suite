@@ -527,6 +527,7 @@ class TestUnconfirmedFillCooldown(unittest.TestCase):
         bot = TradingBot.__new__(TradingBot)
         bot.logger = MagicMock()
         bot.trading_client = MagicMock()
+        bot._save_state = MagicMock()
         bot.symbol_unconfirmed_fill_strikes = {}
         bot.symbol_unconfirmed_fill_paused_until = {}
         bot.symbol_consecutive_losses = {}
@@ -577,6 +578,22 @@ class TestUnconfirmedFillCooldown(unittest.TestCase):
         self.assertFalse(bot._is_symbol_unconfirmed_fill_paused("LDO/USD"))
         self.assertEqual(bot.symbol_unconfirmed_fill_strikes["LDO/USD"], 0)
         self.assertNotIn("LDO/USD", bot.symbol_unconfirmed_fill_paused_until)
+        bot._save_state.assert_called_once()
+
+    def test_existing_cooldown_is_not_extended_by_additional_strikes(self):
+        """Already-active cooldown should keep original expiry timestamp."""
+        import cryptotrades.core.trading_engine as te
+
+        bot = self._make_bot()
+        original_pause_until = datetime.now() + timedelta(hours=1)
+        bot.symbol_unconfirmed_fill_strikes["LDO/USD"] = 3
+        bot.symbol_unconfirmed_fill_paused_until["LDO/USD"] = original_pause_until
+
+        with patch.object(te.cfg, "SYMBOL_UNCONFIRMED_FILL_STRIKES", 3), \
+             patch.object(te.cfg, "SYMBOL_UNCONFIRMED_FILL_COOLDOWN_HOURS", 4.0):
+            bot._record_symbol_unconfirmed_fill("LDO/USD", reason="unconfirmed_fill")
+
+        self.assertEqual(bot.symbol_unconfirmed_fill_paused_until["LDO/USD"], original_pause_until)
 
     def test_unconfirmed_fill_state_survives_save_and_load_round_trip(self):
         """Unconfirmed-fill strike/cooldown state should persist across restart."""
