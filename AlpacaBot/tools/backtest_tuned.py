@@ -462,12 +462,14 @@ def align_index_before(primary_ts, trend_ts, i, buffer_minutes):
 def run_config(name, price, bars_per_day, lookback, signal_fn, dte_fn,
                 max_hold_days_fn, min_hold_days=0, trend=None,
                 trend_buffer_minutes=0, ml_gate=None, cooldown_bars=6,
-                signal_check_interval=2):
+                signal_check_interval=2, symbols=None):
     """
     price: {symbol: {"close": np.ndarray, "ts": np.ndarray[datetime64]}}
     trend: {symbol: {"close": np.ndarray, "ts": np.ndarray[datetime64]}} or None
     dte_fn / max_hold_days_fn: symbol -> value
+    symbols: explicit list of symbols to trade (defaults to module SYMBOLS if None)
     """
+    syms = symbols if symbols is not None else SYMBOLS
     max_bars = max(len(p["close"]) for p in price.values())
     warmup = lookback + 5
     balance = INITIAL_BALANCE
@@ -549,12 +551,14 @@ def run_config(name, price, bars_per_day, lookback, signal_fn, dte_fn,
         if len(positions) >= MAX_POSITIONS:
             continue
 
-        for sym in SYMBOLS:
+        for sym in syms:
             if len(positions) >= MAX_POSITIONS:
                 break
             if any(p["symbol"] == sym for p in positions):
                 continue
             if bar_idx < cooldowns.get(sym, 0):
+                continue
+            if sym not in price:
                 continue
 
             closes = price[sym]["close"]
@@ -793,6 +797,7 @@ def main():
         dte_fn=get_dte_for_symbol_A, max_hold_days_fn=cfg.get_max_hold_days,
         min_hold_days=0, trend=None, ml_gate=ml_gate,
         cooldown_bars=cfg.COOLDOWN_BARS, signal_check_interval=cfg.SIGNAL_CHECK_BARS,
+        symbols=symbols,
     ))
 
     print("\n" + "=" * 78)
@@ -804,6 +809,7 @@ def main():
         max_hold_days_fn=lambda sym: 1, min_hold_days=0,
         trend=data_15min, trend_buffer_minutes=15, ml_gate=None,
         cooldown_bars=12, signal_check_interval=3,
+        symbols=symbols,
     ))
 
     print("\n" + "=" * 78)
@@ -815,6 +821,7 @@ def main():
         max_hold_days_fn=lambda sym: 5, min_hold_days=2,
         trend=data_daily, trend_buffer_minutes=1440, ml_gate=None,
         cooldown_bars=4, signal_check_interval=1,
+        symbols=symbols,
     ))
 
     for r in results:
