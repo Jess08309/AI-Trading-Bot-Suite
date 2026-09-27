@@ -64,6 +64,7 @@ for svc in "${retired_units[@]}"; do
     systemctl disable --now "$unit" 2>/dev/null || true
     rm -f "/etc/systemd/system/${unit}" "/lib/systemd/system/${unit}" "/usr/lib/systemd/system/${unit}"
     rm -f /etc/systemd/system/*.wants/"${unit}" /etc/systemd/system/*.requires/"${unit}"
+    systemctl reset-failed "$unit" 2>/dev/null || true
 done
 systemctl daemon-reload
 
