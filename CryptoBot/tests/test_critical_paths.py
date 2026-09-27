@@ -4,7 +4,8 @@ Tests for: risk limits, ML model predictions, feature computation, regime detect
 All external dependencies are mocked — no real API calls or file I/O.
 """
 import unittest
-from datetime import datetime
+import tempfile
+from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock, PropertyMock
 import numpy as np
 import sys
@@ -458,7 +459,8 @@ class TestFillConfirmation(unittest.TestCase):
         self.assertAlmostEqual(float(submitted_order.qty), 0.4)
 
     def test_sell_zero_fill_keeps_position_tracked(self):
-        """A sell that doesn't confirm any fill must NOT delete local state."""
+        """A sell that doesn't confirm any fill must NOT delete local state, but
+        DOES persist the incremented retry counter (fix/cryptobot-dust-reconciliation)."""
         position = self._make_position(broker_qty=2.0)
         bot = self._make_bot(positions={"AAVE/USD": position})
         bot._alpaca_sell_spot = MagicMock(return_value=0.0)
@@ -467,7 +469,8 @@ class TestFillConfirmation(unittest.TestCase):
 
         self.assertIn("AAVE/USD", bot.positions)
         self.assertEqual(bot.positions["AAVE/USD"].broker_qty, 2.0)
-        bot._save_state.assert_not_called()
+        self.assertEqual(bot.positions["AAVE/USD"].close_retry_count, 1)
+        bot._save_state.assert_called_once()
 
     def test_repeated_broker_zero_qty_available_reconciles_explicitly(self):
         """Repeated explicit broker-zero confirmations should reconcile instead of retrying forever."""
@@ -509,6 +512,283 @@ class TestFillConfirmation(unittest.TestCase):
         self.assertNotIn("AAVE/USD", bot.positions)
         bot._save_state.assert_called_once()
         bot.risk_manager.record_trade.assert_called_once()
+
+
+class TestSellSpotQtyAvailableTruthiness(unittest.TestCase):
+    """Regression tests for the _alpaca_sell_spot qty_available truthiness bug
+    (fix/cryptobot-dust-reconciliation): an explicit 0.0 reading must never be
+    treated the same as a missing/None reading.
+    """
+
+    def _make_bot(self):
+        from cryptotrades.core.trading_engine import TradingBot
+        bot = TradingBot.__new__(TradingBot)
+        bot.logger = MagicMock()
+        bot.trading_client = MagicMock()
+        return bot
+
+    def test_qty_available_zero_skips_order_instead_of_overselling(self):
+        """qty_available == 0.0 must clamp to zero and skip the order entirely,
+        not fall back to the (possibly stale/larger) position.qty."""
+        broker_position = MagicMock(qty_available=0.0, qty=50.0)
+        bot = self._make_bot()
+        bot.trading_client.get_open_position.return_value = broker_position
+
+        result = bot._alpaca_sell_spot("GRT/USD", 50.0)
+
+        self.assertEqual(result, 0.0)
+        bot.trading_client.submit_order.assert_not_called()
+
+    def test_qty_available_none_falls_back_to_position_qty(self):
+        """A missing qty_available (None) legitimately falls back to position.qty."""
+        broker_position = MagicMock(qty_available=None, qty=50.0)
+        bot = self._make_bot()
+        bot.trading_client.get_open_position.return_value = broker_position
+        order = MagicMock(id="order-9", filled_qty="50.0")
+        bot.trading_client.submit_order.return_value = order
+        bot.trading_client.get_order_by_id.return_value = order
+
+        with patch("cryptotrades.core.trading_engine.time.sleep"):
+            result = bot._alpaca_sell_spot("GRT/USD", 50.0)
+
+        self.assertEqual(result, 50.0)
+        bot.trading_client.submit_order.assert_called_once()
+
+    def test_qty_available_partial_clamps_request(self):
+        """A smaller-but-nonzero qty_available must clamp the sell down, not oversell."""
+        broker_position = MagicMock(qty_available=30.0, qty=50.0)
+        bot = self._make_bot()
+        bot.trading_client.get_open_position.return_value = broker_position
+        order = MagicMock(id="order-10", filled_qty="30.0")
+        bot.trading_client.submit_order.return_value = order
+        bot.trading_client.get_order_by_id.return_value = order
+
+        with patch("cryptotrades.core.trading_engine.time.sleep"):
+            bot._alpaca_sell_spot("GRT/USD", 50.0)
+
+        submitted_order = bot.trading_client.submit_order.call_args[0][0]
+        self.assertEqual(submitted_order.qty, 30.0)
+
+
+class TestDustReconciliation(unittest.TestCase):
+    """Tests for bounded-retry dust reconciliation on stuck zero-fill closes
+    (fix/cryptobot-dust-reconciliation): a stuck LOCAL dust entry may only be
+    dropped after repeated failed retries over time AND an independent,
+    freshly-confirmed broker read of zero remaining quantity — never as a
+    shortcut on the first failure, and never without that broker re-check.
+    """
+
+    def _make_bot(self, **overrides):
+        from cryptotrades.core.trading_engine import TradingBot
+        bot = TradingBot.__new__(TradingBot)
+        bot.logger = MagicMock()
+        bot.trading_client = overrides.pop("trading_client", MagicMock())
+        bot.positions = overrides.pop("positions", {})
+        bot.balance_spot = 5000.0
+        bot.balance_futures = 5000.0
+        bot.risk_manager = MagicMock()
+        bot.advisor = None
+        bot._save_state = MagicMock()
+        bot._log_trade_csv = MagicMock()
+        bot._record_symbol_result = MagicMock()
+        bot._record_direction_result = MagicMock()
+        bot._apply_slippage = MagicMock(side_effect=lambda price, direction, is_entry, is_futures: price)
+        for key, value in overrides.items():
+            setattr(bot, key, value)
+        return bot
+
+    def _make_dust_position(self, broker_qty=0.03, retry_count=0, retry_first_at=None):
+        from cryptotrades.core.trading_engine import Position
+        return Position(
+            symbol="AVAX/USD",
+            direction="LONG",
+            entry_price=11.0,
+            size=185.0,  # ~16.8 base units at entry -> broker_qty=0.03 is ~0.18% -> dust-sized
+            entry_time=datetime.now(),
+            stop_loss=10.0,
+            take_profit=12.0,
+            max_price=11.0,
+            broker_qty=broker_qty,
+            close_retry_count=retry_count,
+            close_retry_first_at=retry_first_at,
+        )
+
+    def test_first_zero_fill_increments_retry_and_persists_but_defers(self):
+        """The very first failed retry must persist the counter (save_state
+        called) and must NOT attempt broker reconciliation yet."""
+        position = self._make_dust_position(retry_count=0, retry_first_at=None)
+        bot = self._make_bot(positions={"AVAX/USD": position})
+        bot._alpaca_sell_spot = MagicMock(return_value=0.0)
+        bot._confirm_zero_broker_qty = MagicMock()
+
+        bot._close_position("AVAX/USD", 11.0, "MAX_HOLD_FLAT", 0.0)
+
+        self.assertIn("AVAX/USD", bot.positions)
+        self.assertEqual(bot.positions["AVAX/USD"].close_retry_count, 1)
+        self.assertIsNotNone(bot.positions["AVAX/USD"].close_retry_first_at)
+        bot._save_state.assert_called_once()
+        bot._confirm_zero_broker_qty.assert_not_called()
+
+    def test_confirmed_sell_resets_retry_streak(self):
+        """A subsequent confirmed sell must clear any retry streak that had built up."""
+        position = self._make_dust_position(
+            broker_qty=2.0, retry_count=3, retry_first_at=datetime.now() - timedelta(hours=1)
+        )
+        bot = self._make_bot(positions={"AVAX/USD": position})
+        bot._alpaca_sell_spot = MagicMock(return_value=2.0)
+
+        bot._close_position("AVAX/USD", 11.0, "TAKE_PROFIT", 1.0)
+
+        self.assertNotIn("AVAX/USD", bot.positions)  # fully closed & removed
+
+    def test_not_enough_retries_defers_reconciliation(self):
+        """Below the minimum retry count, even a dust-sized/old position must stay tracked."""
+        from cryptotrades.core.trading_engine import cfg
+        position = self._make_dust_position(
+            broker_qty=0.03,
+            retry_count=cfg.DUST_RECONCILE_MIN_RETRIES - 2,
+            retry_first_at=datetime.now() - timedelta(hours=cfg.DUST_RECONCILE_MIN_HOURS + 1),
+        )
+        bot = self._make_bot(positions={"AVAX/USD": position})
+        bot._alpaca_sell_spot = MagicMock(return_value=0.0)
+        bot._confirm_zero_broker_qty = MagicMock(return_value=True)
+
+        bot._close_position("AVAX/USD", 11.0, "MAX_HOLD_FLAT", 0.0)
+
+        self.assertIn("AVAX/USD", bot.positions)
+        bot._confirm_zero_broker_qty.assert_not_called()
+
+    def test_not_dust_sized_never_reconciles_even_with_many_retries(self):
+        """A large residual (not dust) must never be auto-reconciled, no matter
+        how many retries have elapsed — this must never delete real exposure."""
+        from cryptotrades.core.trading_engine import cfg
+        position = self._make_dust_position(
+            broker_qty=10.0,  # ~59% of the ~16.8 estimated original qty -- NOT dust
+            retry_count=cfg.DUST_RECONCILE_MIN_RETRIES + 5,
+            retry_first_at=datetime.now() - timedelta(hours=cfg.DUST_RECONCILE_MIN_HOURS + 10),
+        )
+        bot = self._make_bot(positions={"AVAX/USD": position})
+        bot._alpaca_sell_spot = MagicMock(return_value=0.0)
+        bot._confirm_zero_broker_qty = MagicMock(return_value=True)
+
+        bot._close_position("AVAX/USD", 11.0, "MAX_HOLD_FLAT", 0.0)
+
+        self.assertIn("AVAX/USD", bot.positions)
+        bot._confirm_zero_broker_qty.assert_not_called()
+
+    def test_dust_and_stale_but_broker_still_shows_exposure_keeps_position(self):
+        """Even once dust/retry/time thresholds are all met, if the broker's
+        independent re-check does NOT confirm zero, the local record must be
+        kept — never delete state that might still represent real exposure."""
+        from cryptotrades.core.trading_engine import cfg
+        position = self._make_dust_position(
+            broker_qty=0.03,
+            retry_count=cfg.DUST_RECONCILE_MIN_RETRIES,
+            retry_first_at=datetime.now() - timedelta(hours=cfg.DUST_RECONCILE_MIN_HOURS + 1),
+        )
+        bot = self._make_bot(positions={"AVAX/USD": position})
+        bot._alpaca_sell_spot = MagicMock(return_value=0.0)
+        bot._confirm_zero_broker_qty = MagicMock(return_value=False)
+
+        bot._close_position("AVAX/USD", 11.0, "MAX_HOLD_FLAT", 0.0)
+
+        self.assertIn("AVAX/USD", bot.positions)
+        bot._confirm_zero_broker_qty.assert_called_once_with("AVAX/USD")
+
+    def test_dust_stale_and_broker_confirms_zero_reconciles_local_record_only(self):
+        """All gates satisfied AND broker confirms zero -> drop the LOCAL record.
+        No broker order/action is taken as part of reconciliation itself."""
+        from cryptotrades.core.trading_engine import cfg
+        position = self._make_dust_position(
+            broker_qty=0.03,
+            retry_count=cfg.DUST_RECONCILE_MIN_RETRIES,
+            retry_first_at=datetime.now() - timedelta(hours=cfg.DUST_RECONCILE_MIN_HOURS + 1),
+        )
+        bot = self._make_bot(positions={"AVAX/USD": position})
+        bot._alpaca_sell_spot = MagicMock(return_value=0.0)
+        bot._confirm_zero_broker_qty = MagicMock(return_value=True)
+
+        bot._close_position("AVAX/USD", 11.0, "MAX_HOLD_FLAT", 0.0)
+
+        self.assertNotIn("AVAX/USD", bot.positions)
+        bot.trading_client.submit_order.assert_not_called()
+        self.assertEqual(bot._save_state.call_count, 2)  # retry-count bump, then the drop
+
+    def test_confirm_zero_broker_qty_true_on_404(self):
+        """A confirmed 404 'position does not exist' must count as a true zero."""
+        from cryptotrades.core.trading_engine import TradingBot, APIError
+        bot = TradingBot.__new__(TradingBot)
+        bot.trading_client = MagicMock()
+        http_error = MagicMock()
+        http_error.response.status_code = 404
+        bot.trading_client.get_open_position.side_effect = APIError(
+            '{"code":40410000,"message":"position does not exist"}', http_error=http_error
+        )
+
+        self.assertTrue(bot._confirm_zero_broker_qty("XTZ/USD"))
+
+    def test_confirm_zero_broker_qty_false_on_other_api_error(self):
+        """A non-404 API error (e.g. auth/rate-limit) must NOT be treated as a
+        confirmed zero — only an unambiguous not-found counts."""
+        from cryptotrades.core.trading_engine import TradingBot, APIError
+        bot = TradingBot.__new__(TradingBot)
+        bot.trading_client = MagicMock()
+        http_error = MagicMock()
+        http_error.response.status_code = 500
+        bot.trading_client.get_open_position.side_effect = APIError(
+            '{"code":50000000,"message":"internal error"}', http_error=http_error
+        )
+
+        self.assertFalse(bot._confirm_zero_broker_qty("XTZ/USD"))
+
+    def test_confirm_zero_broker_qty_false_when_broker_reports_remaining_qty(self):
+        """If the broker still reports a nonzero position, it's not a confirmed zero."""
+        from cryptotrades.core.trading_engine import TradingBot
+        bot = TradingBot.__new__(TradingBot)
+        bot.trading_client = MagicMock()
+        bot.trading_client.get_open_position.return_value = MagicMock(qty_available=5.0, qty=5.0)
+
+        self.assertFalse(bot._confirm_zero_broker_qty("AVAX/USD"))
+
+    def test_retry_state_survives_save_and_load_round_trip(self):
+        """Restart/persistence test: close_retry_count/close_retry_first_at must
+        survive a real _save_state -> _load_state round trip (simulating a bot
+        restart mid-retry-streak), not just live in memory."""
+        from cryptotrades.core.trading_engine import TradingBot, Position
+
+        with tempfile.TemporaryDirectory() as tmp_root:
+            fake_file = os.path.join(tmp_root, "cryptotrades", "core", "trading_engine.py")
+            os.makedirs(os.path.dirname(fake_file), exist_ok=True)
+
+            retry_first_at = datetime.now().replace(microsecond=0)
+            position = Position(
+                symbol="XTZ/USD", direction="LONG", entry_price=0.33, size=185.0,
+                entry_time=datetime.now(), stop_loss=0.30, take_profit=0.36, max_price=0.33,
+                broker_qty=1.2273028619999877, close_retry_count=4, close_retry_first_at=retry_first_at,
+            )
+
+            saver = TradingBot.__new__(TradingBot)
+            saver.positions = {"XTZ/USD": position}
+            saver.balance_spot = 0.0
+            saver.balance_futures = 0.0
+            saver.risk_manager = MagicMock(
+                peak_balance=0.0, daily_pnl=0.0, consecutive_losses=0, last_reset=datetime.now()
+            )
+            saver.market_data = MagicMock(price_history={})
+            saver.logger = MagicMock()
+
+            with patch("cryptotrades.core.trading_engine.__file__", fake_file):
+                saver._save_state()
+
+                loader = TradingBot.__new__(TradingBot)
+                loader.positions = {}
+                loader.logger = MagicMock()
+                loader._load_state()
+
+        restored = loader.positions["XTZ/USD"]
+        self.assertEqual(restored.close_retry_count, 4)
+        self.assertEqual(restored.close_retry_first_at, retry_first_at)
+        self.assertAlmostEqual(restored.broker_qty, 1.2273028619999877)
 
 
 if __name__ == '__main__':

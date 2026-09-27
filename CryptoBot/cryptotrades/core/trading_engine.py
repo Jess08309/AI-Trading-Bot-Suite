@@ -40,6 +40,7 @@ try:
     from alpaca.trading.client import TradingClient
     from alpaca.trading.requests import MarketOrderRequest
     from alpaca.trading.enums import OrderSide, TimeInForce
+    from alpaca.common.exceptions import APIError
     ALPACA_TRADING_SDK_AVAILABLE = True
 except Exception:
     ALPACA_TRADING_SDK_AVAILABLE = False
@@ -136,6 +137,13 @@ class TradingConfig:
     MAX_HOLD_FORCED_HOURS_SPOT: float = 12.0  # Force close spot after 12h (was 5)
     MAX_HOLD_FORCED_HOURS_FUTURES: float = 8.0 # Force close futures after 8h (was 3.5)
     MAX_HOLD_FLAT_BAND_PCT: float = 0.5    # |P/L| < 0.5% counts as "flat"
+
+    # Dust reconciliation - bounded retry before a stuck zero-fill close is
+    # allowed to drop its LOCAL record. Never deletes real broker exposure:
+    # gated on an independent, freshly-confirmed zero-quantity broker read.
+    DUST_RECONCILE_MAX_PCT_OF_SIZE: float = 2.0   # residual must be <=2% of the original qty
+    DUST_RECONCILE_MIN_RETRIES: int = 5           # at least this many failed close attempts
+    DUST_RECONCILE_MIN_HOURS: float = 4.0         # ...spread over at least this long
 
     # Circuit Breaker
     CB_MAX_CONSECUTIVE_LOSSES: int = 5     # Stop after 5 losses in a row
@@ -274,6 +282,9 @@ class TradingConfig:
         self.COUNTER_TREND_ML_OVERRIDE = _env_float("COUNTER_TREND_ML_OVERRIDE_OVERRIDE", self.COUNTER_TREND_ML_OVERRIDE)
         self.MAX_HOLD_HOURS_SPOT = _env_float("MAX_HOLD_HOURS_SPOT_OVERRIDE", self.MAX_HOLD_HOURS_SPOT)
         self.MAX_HOLD_HOURS_FUTURES = _env_float("MAX_HOLD_HOURS_FUTURES_OVERRIDE", self.MAX_HOLD_HOURS_FUTURES)
+        self.DUST_RECONCILE_MAX_PCT_OF_SIZE = _env_float("DUST_RECONCILE_MAX_PCT_OF_SIZE_OVERRIDE", self.DUST_RECONCILE_MAX_PCT_OF_SIZE)
+        self.DUST_RECONCILE_MIN_RETRIES = _env_int("DUST_RECONCILE_MIN_RETRIES_OVERRIDE", self.DUST_RECONCILE_MIN_RETRIES)
+        self.DUST_RECONCILE_MIN_HOURS = _env_float("DUST_RECONCILE_MIN_HOURS_OVERRIDE", self.DUST_RECONCILE_MIN_HOURS)
         self.FUTURES_TAKE_PROFIT = _env_float("FUTURES_TAKE_PROFIT_OVERRIDE", self.FUTURES_TAKE_PROFIT)
         self.TRAILING_ACTIVATE_PCT = _env_float("TRAILING_ACTIVATE_PCT_OVERRIDE", self.TRAILING_ACTIVATE_PCT)
         self.SYMBOL_PAUSE_CONSECUTIVE_LOSSES = _env_int("SYMBOL_PAUSE_CONSECUTIVE_LOSSES_OVERRIDE", self.SYMBOL_PAUSE_CONSECUTIVE_LOSSES)
@@ -390,6 +401,8 @@ class Position:
     broker_qty: float = 0.0  # Real Alpaca fill qty, if a live spot order was placed
     broker_zero_qty_confirmations: int = 0  # Consecutive broker-confirmed zero-available close attempts
     kraken_order_id: str = ""  # Real Kraken Futures order id, if a live futures order was placed
+    close_retry_count: int = 0  # Consecutive failed/zero-fill close attempts, persisted across restarts
+    close_retry_first_at: Optional[datetime] = None  # When the current retry streak began
 
 
 @dataclass
@@ -2427,13 +2440,18 @@ class TradingBot:
             return 0.0
         # Crypto trading fees are deducted from the base asset, so the tracked fill
         # qty can slightly exceed what's actually held — clamp to the real balance.
+        # qty_available can legitimately be 0.0 (nothing free right now) — must NOT
+        # fall back to position.qty via `or` in that case (that truthiness bug let
+        # oversell attempts through, which partially filled and left fee-dust
+        # behind — see fix/cryptobot-dust-reconciliation).
         try:
             available, _explicit_available = self._alpaca_spot_available_qty(symbol)
             if available is not None:
-                qty = min(qty, available)
+                qty = min(qty, max(available, 0.0))
         except Exception:
             pass
         if qty <= 0:
+            self.logger.warning(f"ALPACA SELL {symbol}: broker reports nothing available to sell — skipping order")
             return 0.0
         try:
             order = self.trading_client.submit_order(MarketOrderRequest(
@@ -2469,6 +2487,49 @@ class TradingBot:
             raw_qty = getattr(position, "qty", None)
             return (float(raw_qty), False) if raw_qty is not None else (None, False)
         return float(raw_available), True
+
+    def _should_reconcile_dust(self, position: "Position") -> bool:
+        """Conservative gate for dropping a stuck local position with no confirmed sell.
+
+        ALL of these must hold before we even attempt an independent broker
+        re-check: the residual must be dust-sized relative to the ORIGINAL
+        position (estimated from notional size / entry price, since broker_qty
+        itself may have already been reduced by earlier partial-fill retries),
+        and we must have already failed to close it repeatedly over a
+        meaningful stretch of wall-clock time — never on a couple of quick
+        retries during a transient blip.
+        """
+        if position.close_retry_first_at is None:
+            return False
+        original_qty_est = position.size / max(position.entry_price, 1e-12)
+        is_dust = position.broker_qty <= max(original_qty_est, 1e-12) * (cfg.DUST_RECONCILE_MAX_PCT_OF_SIZE / 100.0)
+        enough_retries = position.close_retry_count >= cfg.DUST_RECONCILE_MIN_RETRIES
+        enough_time = (datetime.now() - position.close_retry_first_at) >= timedelta(hours=cfg.DUST_RECONCILE_MIN_HOURS)
+        return is_dust and enough_retries and enough_time
+
+    def _confirm_zero_broker_qty(self, symbol: str) -> bool:
+        """Independent, fresh broker re-check before ever reconciling a stuck entry.
+
+        Returns True ONLY when the broker unambiguously confirms there is
+        nothing left to sell (a real 404 "position does not exist", or an
+        explicit qty/qty_available of 0) — never on a generic/transient
+        error, so a network blip can never be misread as "safe to delete".
+        This never places an order or otherwise touches broker state.
+        """
+        if not self.trading_client:
+            return False
+        try:
+            position = self.trading_client.get_open_position(symbol.replace("/", ""))
+            raw_qty = getattr(position, "qty", None)
+            qty = float(raw_qty) if raw_qty is not None else None
+            available, explicit_available = self._alpaca_spot_available_qty(symbol)
+            if explicit_available and available is not None:
+                return available <= 0 or (qty is not None and qty <= 0)
+            return qty is not None and qty <= 0
+        except APIError as e:
+            return e.status_code == 404
+        except Exception:
+            return False
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown gracefully."""
@@ -2519,6 +2580,7 @@ class TradingBot:
                         payload = dict(pos)
                         payload["entry_time"] = self._parse_datetime(payload.get("entry_time")) or datetime.now()
                         payload["stale_since"] = self._parse_datetime(payload.get("stale_since"))
+                        payload["close_retry_first_at"] = self._parse_datetime(payload.get("close_retry_first_at"))
                         if "peak_pnl_pct" not in payload:
                             payload["peak_pnl_pct"] = 0.0
                         position = Position(**payload)
@@ -3377,13 +3439,44 @@ class TradingBot:
                     )
                     position.broker_qty = 0.0
                     position.broker_zero_qty_confirmations = 0
+                    position.close_retry_count = 0
+                    position.close_retry_first_at = None
                 else:
                     position.broker_zero_qty_confirmations = 0
-                    self.logger.warning(
-                        f"CLOSE {symbol}: Alpaca sell did NOT confirm any fill — "
-                        f"KEEPING position tracked at broker_qty={position.broker_qty:.8f} for retry"
-                    )
+                    position.close_retry_count += 1
+                    if position.close_retry_first_at is None:
+                        position.close_retry_first_at = datetime.now()
+                    self._save_state()
+
+                    if self._should_reconcile_dust(position):
+                        if self._confirm_zero_broker_qty(symbol):
+                            retry_span = datetime.now() - position.close_retry_first_at
+                            self.logger.warning(
+                                f"CLOSE {symbol}: dust reconciliation — broker independently "
+                                f"confirms zero sellable quantity after {position.close_retry_count} "
+                                f"failed attempts over {retry_span} (residual broker_qty="
+                                f"{position.broker_qty:.8f}); dropping stale LOCAL record only, "
+                                f"no broker action taken"
+                            )
+                            del self.positions[position_key]
+                            self._save_state()
+                        else:
+                            self.logger.warning(
+                                f"CLOSE {symbol}: dust reconciliation deferred — broker still "
+                                f"reports non-zero exposure, KEEPING position tracked for retry "
+                                f"(attempt {position.close_retry_count})"
+                            )
+                    else:
+                        self.logger.warning(
+                            f"CLOSE {symbol}: Alpaca sell did NOT confirm any fill "
+                            f"(attempt {position.close_retry_count}) — KEEPING position tracked "
+                            f"at broker_qty={position.broker_qty:.8f} for retry"
+                        )
                     return
+
+            position.close_retry_count = 0
+            position.close_retry_first_at = None
+            position.broker_zero_qty_confirmations = 0
             if sold_qty < position.broker_qty * 0.999:
                 remaining = position.broker_qty - sold_qty
                 self.logger.warning(
