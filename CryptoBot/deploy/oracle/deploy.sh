@@ -112,7 +112,7 @@ log "Stopping/disabling retired services (if present)..."
 $SSH "${BOT_USER}@${SERVER_IP}" 'for s in putseller spreadbot alpacabot callbuyer; do sudo systemctl stop "$s" 2>/dev/null || true; sudo systemctl disable "$s" 2>/dev/null || true; done'
 
 log "Restarting active services..."
-$SSH "${BOT_USER}@${SERVER_IP}" 'sudo systemctl daemon-reload; sudo systemctl restart cryptobot; sudo systemctl restart bot-watchdog.timer'
+$SSH "${BOT_USER}@${SERVER_IP}" 'sudo systemctl daemon-reload; sudo systemctl restart cryptobot; sudo systemctl restart bot-watchdog.timer; sudo systemctl start bot-watchdog.service || true'
 
 log "Checking status..."
 $SSH "${BOT_USER}@${SERVER_IP}" 'printf "%-12s %s\n" "cryptobot" "$(systemctl is-active cryptobot 2>/dev/null || echo inactive)"; printf "%-12s %s\n" "watchdog" "$(systemctl is-active bot-watchdog.timer 2>/dev/null || echo inactive)"; for s in putseller spreadbot alpacabot callbuyer; do printf "%-12s %s\n" "$s" "$(systemctl is-enabled "$s" 2>/dev/null || echo not-installed)"; done'
