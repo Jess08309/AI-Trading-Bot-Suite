@@ -64,10 +64,16 @@ requires this universe for controlled comparison.
 
 Usage (from AlpacaBot/, with its own venv):
   .venv/bin/python3 tools/backtest_tuned.py [--symbols SPY,QQQ,...] [--days 200] [--force-refresh]
+  .venv/bin/python3 tools/backtest_tuned.py --start-date 2025-08-04 --end-date 2026-03-02 --cache-label 1min_oos
+    (explicit [start,end) window -- e.g. for out-of-sample validation on a
+    non-overlapping historical period; cached separately via --cache-label
+    so it never collides with the default trailing-days cache)
 """
 import sys, os, math, argparse, warnings
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -79,7 +85,7 @@ from core.indicators import (
     bollinger_bands as bb_series, volatility_ratio as volr_series,
 )
 from core.config import Config, SYMBOL_DTE_MAP, DEFAULT_DTE
-from tools.bar_cache import fetch_1min_cached
+from tools.bar_cache import fetch_1min_cached, fetch_1min_window_cached
 
 try:
     from utils.ml_model import OptionsMLModel
@@ -749,23 +755,44 @@ def parse_args():
     p.add_argument("--symbols", type=str, default=",".join(SYMBOLS))
     p.add_argument("--days", type=int, default=HISTORY_DAYS)
     p.add_argument("--force-refresh", action="store_true")
+    p.add_argument("--start-date", type=str, default=None,
+                    help="Explicit window start YYYY-MM-DD (e.g. out-of-sample "
+                         "validation on a non-overlapping period). Requires --end-date.")
+    p.add_argument("--end-date", type=str, default=None,
+                    help="Explicit window end YYYY-MM-DD, exclusive. Requires --start-date.")
+    p.add_argument("--cache-label", type=str, default="1min_oos",
+                    help="Cache file label for an explicit --start-date/--end-date window "
+                         "(kept separate from the default trailing-days cache so different "
+                         "historical periods never collide/overwrite each other).")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
     symbols = [s.strip().upper() for s in args.symbols.split(",")]
+    use_window = bool(args.start_date and args.end_date)
 
     print("=" * 78)
     print("  AlpacaBot Strategy-Improvement Comparative Backtest")
     print("  Config A (baseline+ML) vs B (scalp-tuned) vs C (swing-tuned)")
-    print(f"  Universe: {', '.join(symbols)} | Balance: ${INITIAL_BALANCE:,.0f} | Days: {args.days}")
+    if use_window:
+        print(f"  Universe: {', '.join(symbols)} | Balance: ${INITIAL_BALANCE:,.0f} | "
+              f"Window: {args.start_date} to {args.end_date} (label={args.cache_label})")
+    else:
+        print(f"  Universe: {', '.join(symbols)} | Balance: ${INITIAL_BALANCE:,.0f} | Days: {args.days}")
     print("=" * 78)
 
-    print(f"\n[1/3] Fetching 1-min bars (~{args.days}d, cached, IEX feed)...")
+    window_desc = f"window {args.start_date} to {args.end_date}" if use_window else f"~{args.days}d trailing"
+    print(f"\n[1/3] Fetching 1-min bars ({window_desc}, cached, IEX feed)...")
     data_1min = {}
     for sym in symbols:
-        df = fetch_1min_cached(sym, days=args.days, force=args.force_refresh)
+        if use_window:
+            start_dt = datetime.strptime(args.start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(args.end_date, "%Y-%m-%d")
+            df = fetch_1min_window_cached(sym, start_dt, end_dt, label=args.cache_label,
+                                           force=args.force_refresh)
+        else:
+            df = fetch_1min_cached(sym, days=args.days, force=args.force_refresh)
         data_1min[sym] = df
         days_covered = df["timestamp"].astype(str).str[:10].nunique()
         print(f"  {sym}: {len(df):,} 1-min bars ({days_covered} trading days)")
