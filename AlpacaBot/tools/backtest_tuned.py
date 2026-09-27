@@ -18,7 +18,7 @@ STEP 1 recap (full matrix in docs/indicator_correlation.md):
   not trigger. One genuine 5-way redundancy cluster was found instead:
   bb_position / zscore / williams_r / cci / stochastic (all |r| >= 0.8 --
   mean-reversion/oscillator family carrying the same information). Trimmed
-  set for Configs B/C chosen from real data, not assumed: rsi, macd_hist,
+  set for Configs B/C/D/G chosen from real data, not assumed: rsi, macd_hist,
   bb_position (one representative of the big cluster), and volatility_ratio
   (the most orthogonal 4th indicator available -- max |r| = 0.03 against the
   other 3, versus 0.20-0.60 for every other candidate).
@@ -63,24 +63,48 @@ Config D (ML HYBRID, optional -- only runs when --configs includes "D"):
   walk-forward test windows, then frozen and reused unchanged across every
   test window -- same no-look-ahead methodology already established in this
   repo for CryptoBot's pipeline v4 frozen gate model. MIN confidence 0.55.
+Config G (GAMMA-SCALP, optional -- only runs when --configs includes "G"):
+  5-min bars (resampled from 1-min), same trimmed 4-indicator scoring as
+  B/C/D, 1-hour trend-agreement filter (only calls allowed in an uptrend,
+  only puts in a downtrend -- flat/no-trend allows either), 1-7 DTE options
+  (entry DTE fixed at 7, the top of the stated range, so there is room left
+  before the 3-DTE hard exit -- documented assumption since a closes-only
+  backtest can't select from a real listed-expiration chain). Exit rules
+  are Config-G-specific (NOT the shared A/B/C/D stop-loss/take-profit/
+  trailing-stop constants): stop-loss -40%, take-profit +75%, a theta
+  stop (exits once cumulative P&L% <= -4% * days_held -- a scaling-
+  allowance proxy for "losing value faster than acceptable time decay",
+  since isolating theta from delta P&L isn't possible with a single BS
+  price per bar), and a hard exit at 3 DTE remaining. Trailing-stop and
+  MAX_HOLD are both disabled for Config G (not part of its stated rules).
+  Adds an IV-percentile entry filter (only enter when the estimate_iv()
+  proxy's percentile rank within its own trailing ~60-trading-day history
+  is below 40 -- "buy options when they're statistically cheap", standard
+  for a long-premium strategy; reuses core/indicators.py::iv_percentile
+  unmodified). Position sizing is 2% of balance per trade (vs 15% for
+  A/B/C/D). Does NOT implement continuous delta-hedging/rebalancing (the
+  literal mechanics of "gamma scalping") -- this is a directional long-
+  option config with short DTE and gamma-scalp-style exit rules, consistent
+  with how Configs B/C/D are already directional, not spread/hedged,
+  strategies in this same backtest framework.
 
-All 3 (or 4, with D) configs share: universe, date range, sizing formula,
-MAX_POSITIONS, and the Black-Scholes pricing/IV-estimation -- only bar
-timeframe, indicator set, trend filter, and DTE differ (the intentional
-experiment variables). Universe is SPY/QQQ/AAPL/MSFT/NVDA per the task spec;
-note core/scanner.py's SCANNER_UNIVERSE comment block documents SPY/QQQ/MSFT
-as historically-eliminated DROP symbols (unprofitable, excluded from the
-live scanner's real universe) -- kept here anyway since the task explicitly
-requires this universe for controlled comparison.
+All configs share: universe, date range, and the Black-Scholes pricing/
+IV-estimation -- only bar timeframe, indicator set, trend filter, DTE,
+exit rules, and position sizing differ per-config (the intentional
+experiment variables, each documented above). Universe is SPY/QQQ/AAPL/
+MSFT/NVDA per the task spec; note core/scanner.py's SCANNER_UNIVERSE
+comment block documents SPY/QQQ/MSFT as historically-eliminated DROP
+symbols (unprofitable, excluded from the live scanner's real universe) --
+kept here anyway since the task explicitly requires this universe for
+controlled comparison.
 
 IMPORTANT (fixed 2026-09-27): resample_intraday() now does real calendar-
 time resampling (pandas .resample() on a DatetimeIndex) instead of an
 earlier positional "every Nth row" version. The positional version could
 drift out of wall-clock alignment whenever the underlying 1-min data had
-gaps or a different starting offset between two separate fetches of
-nominally-similar periods -- confirmed via a stark result discrepancy
-between two overlapping-but-not-identical windows. All results in this
-file's history from before this fix should be treated as unreliable.
+gaps or a different starting offset between two separate fetches. All
+results in this file's history from before this fix should be treated as
+unreliable.
 
 Usage (from AlpacaBot/, with its own venv):
   .venv/bin/python3 tools/backtest_tuned.py [--symbols SPY,QQQ,...] [--days 200] [--force-refresh]
@@ -93,6 +117,8 @@ Usage (from AlpacaBot/, with its own venv):
       --configs A,B,C,D --pretrain-start 2022-09-01 --pretrain-end 2024-03-01 --pretrain-cache-label 1min_pretrain
     (adds Config D -- trains the frozen ML hybrid model on the pretrain
     window once, then backtests it on the --start-date/--end-date window)
+  .venv/bin/python3 tools/backtest_tuned.py --start-date 2024-03-01 --end-date 2024-09-01 --cache-label wf_windowA --configs G
+    (Config G -- 5-min gamma-scalp variant; no pretrain needed)
 """
 import sys, os, math, argparse, warnings
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -107,7 +133,7 @@ from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
 
 from core.indicators import (
-    compute_all_indicators,
+    compute_all_indicators, iv_percentile,
     rsi as rsi_series, macd as macd_series,
     bollinger_bands as bb_series, volatility_ratio as volr_series,
 )
@@ -146,6 +172,7 @@ MODE_LABELS = {
     "B_scalp": "B: SCALP-TUNED (2-min, 4-ind, 15m trend filter)",
     "C_swing": "C: SWING-TUNED (1-hour, 4-ind, daily trend filter)",
     "D_ml_hybrid": "D: ML HYBRID (1-hour, GBM classifier, daily trend filter)",
+    "G_gamma_scalp": "G: GAMMA-SCALP (5-min, 1-7 DTE, IV<40pct, 2% risk)",
 }
 
 
@@ -307,7 +334,7 @@ def generate_signal_full(chunk, min_signal_score):
 
 
 # =============================================================
-#  SIGNAL GENERATION -- Config B/C: trimmed 4-indicator set
+#  SIGNAL GENERATION -- Config B/C/D/G: trimmed 4-indicator set
 #  rsi, macd_hist, bb_position, volatility_ratio -- chosen from the real
 #  STEP 1 correlation results (see module docstring). Same per-indicator
 #  point values as the full system; threshold recalibrated for the smaller
@@ -380,9 +407,10 @@ def generate_signal_trimmed(chunk, min_signal_score=TRIMMED_MIN_SIGNAL_SCORE):
 
 
 def trend_bias_trimmed(chunk):
-    """Lightweight trend-agreement filter for Config B (15-min bars) and
-    Config C/D (daily bars). Returns 'call' (bullish), 'put' (bearish), or
-    None (flat -- no directional constraint applied)."""
+    """Lightweight trend-agreement filter for Config B (15-min bars),
+    Config C/D (daily bars), and Config G (1-hour bars). Returns 'call'
+    (bullish), 'put' (bearish), or None (flat -- no directional constraint
+    applied)."""
     if len(chunk) < 25:
         return None
     ind = compute_trimmed_indicators(chunk)
@@ -564,6 +592,46 @@ class MLHybridSignal:
 
 
 # =============================================================
+#  CONFIG G: GAMMA-SCALP -- IV-percentile entry filter
+#  Only enter when the estimate_iv() proxy's percentile rank within its own
+#  trailing history is below a threshold ("buy cheap vol"). Reuses
+#  core/indicators.py::iv_percentile unmodified.
+# =============================================================
+
+IV_PERCENTILE_LOOKBACK_BARS = 4680   # ~60 trading days at 78 5-min bars/day
+IV_PERCENTILE_MAX = 40               # only enter when IV percentile < this
+
+
+def compute_iv_series(closes, bars_per_day, window=30):
+    """Full-series estimate_iv() readings (one per bar), for IV-percentile
+    filtering. Same estimate_iv() formula used for option pricing -- a
+    historical-vol-based IV PROXY, not real market-quoted IV (no real
+    options-chain IV data available in a closes-only backtest)."""
+    n = len(closes)
+    ivs = np.full(n, 0.25)
+    for i in range(window + 1, n):
+        ivs[i] = estimate_iv(closes[:i + 1], window=window, bars_per_day=bars_per_day)
+    return ivs
+
+
+def make_iv_percentile_filter(iv_series_by_symbol, lookback_bars=IV_PERCENTILE_LOOKBACK_BARS,
+                               max_percentile=IV_PERCENTILE_MAX):
+    """Returns an entry_filter_fn(sym, bar_idx) -> bool that only allows
+    entry when the current IV's percentile rank within the trailing
+    `lookback_bars` window is below `max_percentile`."""
+    def _filter(sym, bar_idx):
+        ivs = iv_series_by_symbol.get(sym)
+        if ivs is None or bar_idx >= len(ivs):
+            return True
+        history = ivs[max(0, bar_idx - lookback_bars):bar_idx]
+        if len(history) < 30:
+            return True
+        pctl = iv_percentile(ivs[bar_idx], history)
+        return pctl < max_percentile
+    return _filter
+
+
+# =============================================================
 #  RESAMPLING -- real calendar-time resampling (pandas .resample() on a
 #  DatetimeIndex). FIXED 2026-09-27: an earlier version took every Nth
 #  ROW (positional), which could drift out of true wall-clock alignment
@@ -610,24 +678,51 @@ def align_index_before(primary_ts, trend_ts, i, buffer_minutes):
 
 
 # =============================================================
-#  GENERIC EVENT-LOOP BACKTESTER (shared by Configs A/B/C/D)
+#  GENERIC EVENT-LOOP BACKTESTER (shared by Configs A/B/C/D/G)
 #  Same architecture as backtest_mtf.py::run_single_backtest (mark-to-
 #  market -> exits in priority order -> circuit breakers -> signal
 #  generation -> price + size + open), generalized over bar timeframe /
-#  indicator set / trend filter / DTE rather than hardcoded per-mode.
+#  indicator set / trend filter / DTE / exit rules / sizing / entry filter
+#  rather than hardcoded per-mode. All new optional parameters default to
+#  the shared module constants so Configs A/B/C/D are completely unaffected.
 # =============================================================
 
 def run_config(name, price, bars_per_day, lookback, signal_fn, dte_fn,
                 max_hold_days_fn, min_hold_days=0, trend=None,
                 trend_buffer_minutes=0, ml_gate=None, cooldown_bars=6,
-                signal_check_interval=2, symbols=None):
+                signal_check_interval=2, symbols=None,
+                stop_loss=None, take_profit=None, trailing_stop=None,
+                trailing_trigger=None, enable_trailing_stop=True,
+                dte_exit_buffer_days=None, theta_stop_pct_per_day=None,
+                max_position_pct=None, entry_filter_fn=None):
     """
     price: {symbol: {"close": np.ndarray, "ts": np.ndarray[datetime64]}}
     trend: {symbol: {"close": np.ndarray, "ts": np.ndarray[datetime64]}} or None
     dte_fn / max_hold_days_fn: symbol -> value
     symbols: explicit list of symbols to trade (defaults to module SYMBOLS if None)
+    stop_loss/take_profit/trailing_stop/trailing_trigger/dte_exit_buffer_days:
+        per-call overrides of the shared module constants (None = use the
+        module default, preserving A/B/C/D's existing behavior exactly).
+    enable_trailing_stop: set False to disable the trailing-stop check
+        entirely (Config G's exit rules don't include one).
+    theta_stop_pct_per_day: if set, adds an exit when
+        pnl_pct <= -theta_stop_pct_per_day * days_elapsed (a scaling loss
+        allowance proxying "losing value faster than acceptable time
+        decay"). None (default) disables this check -- only Config G uses it.
+    max_position_pct: overrides MAX_POSITION_PCT for this run (None = use
+        the module default).
+    entry_filter_fn: optional callable(sym, bar_idx) -> bool, checked after
+        the signal+trend filters and before the ML gate/pricing. Return
+        False to skip this entry (used by Config G's IV-percentile filter).
     """
     syms = symbols if symbols is not None else SYMBOLS
+    sl = STOP_LOSS if stop_loss is None else stop_loss
+    tp = TAKE_PROFIT if take_profit is None else take_profit
+    ts_pct = TRAILING_STOP if trailing_stop is None else trailing_stop
+    tt_pct = TRAILING_TRIGGER if trailing_trigger is None else trailing_trigger
+    dte_buf = DTE_EXIT_BUFFER_DAYS if dte_exit_buffer_days is None else dte_exit_buffer_days
+    pos_pct = MAX_POSITION_PCT if max_position_pct is None else max_position_pct
+
     max_bars = max(len(p["close"]) for p in price.values())
     warmup = lookback + 5
     balance = INITIAL_BALANCE
@@ -661,15 +756,18 @@ def run_config(name, price, bars_per_day, lookback, signal_fn, dte_fn,
             min_hold_ok = pos["days_elapsed"] >= pos["min_hold_days"]
             reason = None
 
-            if pnl_pct <= STOP_LOSS:
+            if pnl_pct <= sl:
                 reason = "STOP_LOSS"
-            elif pnl_pct >= TAKE_PROFIT:
+            elif pnl_pct >= tp:
                 reason = "TAKE_PROFIT"
-            elif pos["peak_value"] > pos["premium"] * (1 + TRAILING_TRIGGER):
+            elif (theta_stop_pct_per_day is not None and pos["days_elapsed"] > 0
+                  and pnl_pct <= -theta_stop_pct_per_day * pos["days_elapsed"]):
+                reason = "THETA_STOP"
+            elif enable_trailing_stop and pos["peak_value"] > pos["premium"] * (1 + tt_pct):
                 drop = (pos["current_value"] - pos["peak_value"]) / pos["peak_value"]
-                if drop <= -TRAILING_STOP:
+                if drop <= -ts_pct:
                     reason = "TRAILING_STOP"
-            elif remaining_days <= DTE_EXIT_BUFFER_DAYS:
+            elif remaining_days <= dte_buf:
                 reason = "DTE_EXIT"
             elif min_hold_ok and pos["days_elapsed"] >= pos["max_hold_days"]:
                 reason = "MAX_HOLD"
@@ -742,6 +840,9 @@ def run_config(name, price, bars_per_day, lookback, signal_fn, dte_fn,
                     if bias is not None and bias != direction:
                         continue
 
+            if entry_filter_fn is not None and not entry_filter_fn(sym, bar_idx):
+                continue
+
             if ml_gate is not None:
                 ml_stats["checked"] += 1
                 allowed, ml_conf, _ = ml_gate.check(chunk, direction)
@@ -762,7 +863,7 @@ def run_config(name, price, bars_per_day, lookback, signal_fn, dte_fn,
                 continue
 
             cost_per = premium * 100
-            max_spend = balance * MAX_POSITION_PCT
+            max_spend = balance * pos_pct
             if cost_per > max_spend:
                 continue
             qty = max(1, int(max_spend / cost_per))
@@ -918,7 +1019,7 @@ def parse_args():
                          "(kept separate from the default trailing-days cache so different "
                          "historical periods never collide/overwrite each other).")
     p.add_argument("--configs", type=str, default="A,B,C",
-                    help="Comma list of configs to run, e.g. 'A,B,C,D'. D requires "
+                    help="Comma list of configs to run, e.g. 'A,B,C,D,G'. D requires "
                          "--pretrain-start/--pretrain-end.")
     p.add_argument("--pretrain-start", type=str, default=None,
                     help="Config D only: ML hybrid pretrain window start YYYY-MM-DD. "
@@ -961,18 +1062,19 @@ def main():
         days_covered = df["timestamp"].astype(str).str[:10].nunique()
         print(f"  {sym}: {len(df):,} 1-min bars ({days_covered} trading days)")
 
-    print("\n[2/3] Deriving resampled series (2m/10m/15m/1h/daily) from 1-min data...")
-    data_2min, data_10min, data_15min, data_1hour, data_daily = {}, {}, {}, {}, {}
+    print("\n[2/3] Deriving resampled series (5m/2m/10m/15m/1h/daily) from 1-min data...")
+    data_5min, data_2min, data_10min, data_15min, data_1hour, data_daily = {}, {}, {}, {}, {}, {}
     for sym in symbols:
         df = data_1min[sym]
+        c, t = resample_intraday(df, "5min"); data_5min[sym] = {"close": c, "ts": t}
         c, t = resample_intraday(df, "2min"); data_2min[sym] = {"close": c, "ts": t}
         c, t = resample_intraday(df, "10min"); data_10min[sym] = {"close": c, "ts": t}
         c, t = resample_intraday(df, "15min"); data_15min[sym] = {"close": c, "ts": t}
         c, t = resample_intraday(df, "1h"); data_1hour[sym] = {"close": c, "ts": t}
         c, t = resample_daily(df); data_daily[sym] = {"close": c, "ts": t}
-        print(f"  {sym}: {len(data_2min[sym]['close']):,} 2m | {len(data_10min[sym]['close']):,} 10m | "
-              f"{len(data_15min[sym]['close']):,} 15m | {len(data_1hour[sym]['close']):,} 1h | "
-              f"{len(data_daily[sym]['close']):,} daily")
+        print(f"  {sym}: {len(data_5min[sym]['close']):,} 5m | {len(data_2min[sym]['close']):,} 2m | "
+              f"{len(data_10min[sym]['close']):,} 10m | {len(data_15min[sym]['close']):,} 15m | "
+              f"{len(data_1hour[sym]['close']):,} 1h | {len(data_daily[sym]['close']):,} daily")
 
     results = []
 
@@ -1053,6 +1155,30 @@ def main():
             trend=data_daily, trend_buffer_minutes=1440, ml_gate=None,
             cooldown_bars=4, signal_check_interval=1,
             symbols=symbols,
+        ))
+
+    if "G" in configs_to_run:
+        print("\nComputing IV-percentile series for Config G's entry filter (5-min bars)...")
+        iv_series_by_symbol = {}
+        for sym in symbols:
+            iv_series_by_symbol[sym] = compute_iv_series(data_5min[sym]["close"], bars_per_day=78)
+            print(f"  {sym}: {len(iv_series_by_symbol[sym]):,} IV readings")
+        iv_filter = make_iv_percentile_filter(iv_series_by_symbol)
+
+        print("\n" + "=" * 78)
+        print("  Running Config G: GAMMA-SCALP (5-min, 1-7 DTE, IV<40pct, 2% risk)")
+        print("=" * 78)
+        results.append(run_config(
+            "G_gamma_scalp", data_5min, bars_per_day=78, lookback=50,
+            signal_fn=generate_signal_trimmed, dte_fn=lambda sym: 7,
+            max_hold_days_fn=lambda sym: 999, min_hold_days=0,
+            trend=data_1hour, trend_buffer_minutes=60,
+            ml_gate=None, cooldown_bars=12, signal_check_interval=1,
+            symbols=symbols,
+            stop_loss=-0.40, take_profit=0.75,
+            enable_trailing_stop=False,
+            dte_exit_buffer_days=3.0, theta_stop_pct_per_day=0.04,
+            max_position_pct=0.02, entry_filter_fn=iv_filter,
         ))
 
     for r in results:
