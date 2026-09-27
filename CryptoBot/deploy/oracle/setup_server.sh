@@ -6,6 +6,11 @@
 # ============================================================================
 set -euo pipefail
 
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    echo "This script must be run as root (use sudo)."
+    exit 1
+fi
+
 BOT_USER="botuser"
 BOT_HOME="/home/${BOT_USER}"
 
