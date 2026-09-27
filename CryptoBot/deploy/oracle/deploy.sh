@@ -115,6 +115,6 @@ log "Restarting active services..."
 $SSH "${BOT_USER}@${SERVER_IP}" 'sudo systemctl restart cryptobot; sudo systemctl start bot-watchdog.timer'
 
 log "Checking status..."
-$SSH "${BOT_USER}@${SERVER_IP}" 'printf "%-12s %s\n" "cryptobot" "$(systemctl is-active cryptobot)"; printf "%-12s %s\n" "watchdog" "$(systemctl is-active bot-watchdog.timer)"; for s in putseller spreadbot alpacabot callbuyer; do printf "%-12s %s\n" "$s" "$(systemctl is-enabled "$s" 2>/dev/null || echo not-installed)"; done'
+$SSH "${BOT_USER}@${SERVER_IP}" 'printf "%-12s %s\n" "cryptobot" "$(systemctl is-active cryptobot 2>/dev/null || echo inactive)"; printf "%-12s %s\n" "watchdog" "$(systemctl is-active bot-watchdog.timer 2>/dev/null || echo inactive)"; for s in putseller spreadbot alpacabot callbuyer; do printf "%-12s %s\n" "$s" "$(systemctl is-enabled "$s" 2>/dev/null || echo not-installed)"; done'
 
 log "Deploy complete!"

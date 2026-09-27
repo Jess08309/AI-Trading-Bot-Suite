@@ -60,9 +60,10 @@ CLONE_SCRIPT
 echo "[5/8] Cleaning up retired bot services..."
 retired_units=(putseller spreadbot alpacabot callbuyer)
 for svc in "${retired_units[@]}"; do
-    systemctl stop "$svc" 2>/dev/null || true
-    systemctl disable "$svc" 2>/dev/null || true
-    rm -f "/etc/systemd/system/${svc}.service" "/lib/systemd/system/${svc}.service"
+    unit="${svc}.service"
+    systemctl disable --now "$unit" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${unit}" "/lib/systemd/system/${unit}"
+    rm -f /etc/systemd/system/*.wants/"${unit}" /etc/systemd/system/*.requires/"${unit}"
 done
 systemctl daemon-reload
 
