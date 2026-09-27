@@ -63,8 +63,12 @@ class TradingConfig:
     LIVE_TRADING_WARNING: bool = False
     DRY_RUN: bool = False
 
-    # Capital — increased from $500/$500 to give the bot more spending power per trade
-    INITIAL_SPOT_BALANCE: float = 5000.0
+    # Capital — full portfolio consolidation (2026-09-27): PutSeller/CallBuyer/
+    # AlpacaBot terminated, 100% of the shared paper account's trading capital
+    # now allocated to CryptoBot. Internal risk management (MAX_POSITION_PCT,
+    # circuit breakers, per-symbol/asset-class position caps) is unchanged --
+    # only the capital base it sizes against has grown.
+    INITIAL_SPOT_BALANCE: float = 100000.0
     INITIAL_FUTURES_BALANCE: float = 5000.0
 
     # Timing
