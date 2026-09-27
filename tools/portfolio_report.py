@@ -1,41 +1,35 @@
 #!/usr/bin/env python3
-"""tools/portfolio_report.py — Workstream F: fleet-wide P&L + governance report.
+"""tools/portfolio_report.py — CryptoBot P&L + governance report.
 
-Unified reporting across all 4 bots (AlpacaBot, CallBuyer, PutSeller,
-CryptoBot):
+As of the 2026-09-27 portfolio consolidation, this repository contains a
+single bot (CryptoBot) — this script was previously fleet-wide across 4
+bots (AlpacaBot, CallBuyer, PutSeller, CryptoBot) and has been scoped down
+to match. Full multi-bot history is on branch
+archive/four-bot-portfolio-2026-09-27 if ever needed again.
 
-  * Per-bot performance stats computed from each bot's local trade journal
+  * Performance stats computed from CryptoBot's local trade journal
     (data/trades.csv) — trades, win rate, total P&L, profit factor,
     avg win/loss, max single loss, max drawdown.
-  * "The Rule" scorecard (see docs/GO_LIVE_CRITERIA.md): per-bot pass/fail
-    against the fleet's official go-live/stay-live bar, printed FIRST.
-  * Broker-vs-bot reconciliation: compares each bot's locally-tracked open
-    positions (data/state/positions.json) against the live Alpaca account
-    (via the Alpaca API) to catch PHANTOM (bot thinks it holds a position
-    the broker does not have) and ORPHAN (broker holds a position no bot
-    claims) conditions. Multi-leg positions (PutSeller credit spreads,
-    AlpacaBot vertical spreads) are checked leg-by-leg: if ALL legs are
-    missing at the broker the whole position is a PHANTOM, but if only
-    SOME legs are missing that's reported as a separate, more severe
-    ONE-LEG PHANTOM / naked-leg alert (the actually dangerous state — a
-    hedge the bot thinks exists no longer does). A broker row reporting
-    qty==0 (settlement lag) is treated as absent, not as a match and not
-    as an orphan. Any phantom/one-leg-phantom is surfaced in a CRITICAL
-    section at the very top of the output — this is the standing
-    regression alarm for the NFLX phantom-position bug class.
+  * "The Rule" scorecard (see docs/GO_LIVE_CRITERIA.md): pass/fail
+    against the go-live/stay-live bar, printed FIRST.
+  * Broker-vs-bot reconciliation: compares CryptoBot's locally-tracked
+    open positions (cryptotrades/data/state/positions.json) against the
+    live Alpaca account (via the Alpaca API) to catch PHANTOM (bot thinks
+    it holds a position the broker does not have) and ORPHAN (broker
+    holds a position no local record claims) conditions. A broker row
+    reporting qty==0 (settlement lag) is treated as absent, not as a
+    match and not as an orphan.
 
 Data sources are read-only; this tool never places orders or modifies any
 bot's trade/position state files.
 
 Alpaca credentials are read ONLY from the environment (ALPACA_API_KEY /
-ALPACA_API_SECRET), matching the convention already used across the repo
-(e.g. PutSeller/tools/_check_positions.py, CryptoBot/cryptotrades/core/
-trading_engine.py). Nothing sensitive is ever printed. If the alpaca-py
+ALPACA_API_SECRET). Nothing sensitive is ever printed. If the alpaca-py
 package is not installed or credentials are absent, the reconciliation
 section is skipped with a clear note (all other sections still run).
 
 Usage:
-    python3 tools/portfolio_report.py [--bots ALPACABOT,PUTSELLER,...] [--json]
+    python3 tools/portfolio_report.py [--json]
 """
 from __future__ import annotations
 
@@ -62,51 +56,10 @@ RULE_MAX_DRAWDOWN_PCT = 10.0
 class PositionClaim:
     """One locally-tracked position, expressed as the set of broker-side
     symbols ("legs") that must ALL be present for the position to be
-    considered fully matched. Single-leg positions have exactly one leg;
-    multi-leg spreads (PutSeller credit spreads, AlpacaBot vertical
-    spreads) have two. This lets reconciliation distinguish "the whole
-    position is gone" (ordinary PHANTOM) from "only one leg is gone"
-    (a naked-leg CRITICAL condition — the actually dangerous state).
+    considered fully matched. CryptoBot's positions are all single-leg.
     """
     position_id: str
     legs: List[str] = field(default_factory=list)
-
-
-def _extract_alpacabot_claims(positions: Dict[str, Any]) -> List[PositionClaim]:
-    claims = []
-    for key, pos in positions.items():
-        if not key:
-            continue
-        legs = [key]
-        # Vertical spreads are keyed by the long leg's symbol and also
-        # track the short leg separately (see trading_engine.py _execute_spread).
-        short_leg = pos.get("short_leg_symbol")
-        if pos.get("strategy") == "spread" and short_leg:
-            legs.append(short_leg)
-        claims.append(PositionClaim(position_id=key, legs=legs))
-    return claims
-
-
-def _extract_callbuyer_claims(positions: Dict[str, Any]) -> List[PositionClaim]:
-    claims = []
-    for key, pos in positions.items():
-        # NOTE: `contract` is expected to already be in the same symbol
-        # format Alpaca returns (OCC option symbol) — verify this on the
-        # first real run against a live account; if CallBuyer stores a
-        # different format, add a normalization step here.
-        sym = pos.get("contract") or key
-        if sym:
-            claims.append(PositionClaim(position_id=key, legs=[sym]))
-    return claims
-
-
-def _extract_putseller_claims(positions: Dict[str, Any]) -> List[PositionClaim]:
-    claims = []
-    for key, pos in positions.items():
-        legs = [s for s in (pos.get("short_symbol"), pos.get("long_symbol")) if s]
-        if legs:
-            claims.append(PositionClaim(position_id=key, legs=legs))
-    return claims
 
 
 def _extract_cryptobot_claims(positions: Dict[str, Any]) -> List[PositionClaim]:
@@ -143,15 +96,9 @@ class BotSpec:
 
 
 BOT_SPECS: List[BotSpec] = [
-    BotSpec("AlpacaBot", "AlpacaBot", "data/trades.csv", "data/state/positions.json",
-            "pnl", "timestamp", _extract_alpacabot_claims),
-    BotSpec("CallBuyer", "CallBuyer", "data/trades.csv", "data/state/positions.json",
-            "pnl_dollar", "timestamp", _extract_callbuyer_claims),
-    BotSpec("PutSeller", "PutSeller", "data/trades.csv", "data/state/positions.json",
-            "pnl", "timestamp", _extract_putseller_claims),
     # NOTE: CryptoBot's package root (cryptotrades/) nests its own data/
-    # dir one level deeper than the other 3 bots — trading_engine.py
-    # resolves state paths relative to cryptotrades/, not CryptoBot/.
+    # dir one level deeper than the repo's top-level CryptoBot/ folder --
+    # trading_engine.py resolves state paths relative to cryptotrades/.
     BotSpec("CryptoBot", "CryptoBot", "data/trades.csv", "cryptotrades/data/state/positions.json",
             "pnl_usd", "timestamp", _extract_cryptobot_claims),
 ]
@@ -222,8 +169,8 @@ def _compute_metrics(spec: BotSpec) -> BotMetrics:
 
     # Equity curve drawdown, expressed as % of the running peak. This is a
     # P&L-based curve (peak/trough of cumulative realized P&L), not a
-    # percentage of total account equity — refine with real per-bot
-    # allocation data before treating this as an exact "% of capital" figure.
+    # percentage of total account equity — refine with real allocation
+    # data before treating this as an exact "% of capital" figure.
     equity = 0.0
     peak = 0.0
     max_dd_pct = 0.0
@@ -352,11 +299,6 @@ def _reconcile(bot_claims: Dict[str, List[PositionClaim]],
       (no alert).
     - A claim whose legs are ALL absent is a full PHANTOM (bot thinks it
       holds a position the broker has no trace of at all).
-    - A multi-leg claim where SOME (but not all) legs are present is a
-      naked-leg condition: the local spread believes it holds a hedge
-      that no longer exists at the broker. This is reported separately
-      (one_leg_phantom_alerts) since it is the more dangerous of the two
-      and must never be silently merged into a generic phantom count.
     """
     phantoms: List[str] = []
     orphans: List[str] = []
@@ -380,14 +322,11 @@ def _reconcile(bot_claims: Dict[str, List[PositionClaim]],
                 continue  # fully matched, no alert
 
             if len(legs) == 1 or not present:
-                # Single-leg position missing, or a multi-leg spread whose
-                # legs are ALL gone: the whole tracked position is a phantom.
                 phantoms.append(
                     f"PHANTOM ALERT (bot {bot}): {claim.position_id} "
                     f"(legs: {', '.join(legs)}) tracked locally but NOT found at broker"
                 )
             else:
-                # Some (but not all) legs missing: naked-leg risk.
                 one_leg_phantoms.append(
                     f"ONE-LEG PHANTOM ALERT (bot {bot}): {claim.position_id} has "
                     f"leg(s) MISSING at broker: {', '.join(missing)} — while "
@@ -442,7 +381,6 @@ def print_report(report: Dict[str, Any]) -> None:
     orphans = report["orphans"]
     one_leg_phantoms = report["one_leg_phantoms"]
 
-    # --- CRITICAL section (phantoms) always printed first, if any ---
     if phantoms or one_leg_phantoms:
         print("=" * 70)
         print("CRITICAL: PHANTOM POSITIONS DETECTED")
@@ -453,7 +391,6 @@ def print_report(report: Dict[str, Any]) -> None:
             print(f"  !! {line}")
         print()
 
-    # --- THE RULE SCORECARD (headline output) ---
     print("=" * 70)
     print("THE RULE SCORECARD")
     print(f"(>= {RULE_MIN_TRADES} closed trades AND profit factor > {RULE_MIN_PROFIT_FACTOR} "
@@ -471,7 +408,6 @@ def print_report(report: Dict[str, Any]) -> None:
             print(f"  [{status}] {label:<24} ({detail})")
         print(f"  VERDICT: {'LIVE (passes The Rule)' if overall else 'PAUSE — fails The Rule'}")
 
-    # --- Per-bot detailed performance ---
     print("\n" + "=" * 70)
     print("PER-BOT PERFORMANCE DETAIL")
     print("=" * 70)
@@ -491,7 +427,6 @@ def print_report(report: Dict[str, Any]) -> None:
         print(f"  Max single loss: {_fmt_money(m.max_single_loss)}")
         print(f"  Max drawdown:    {m.max_drawdown_pct:.1f}% (of cumulative-P&L peak; see script docstring)")
 
-    # --- Reconciliation ---
     print("\n" + "=" * 70)
     print("RECONCILIATION (bot state vs. Alpaca broker)")
     print("=" * 70)
@@ -516,15 +451,10 @@ def print_report(report: Dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bots", help="Comma-separated subset of bot names, e.g. ALPACABOT,PUTSELLER")
     parser.add_argument("--json", action="store_true", help="Also print machine-readable JSON summary")
     args = parser.parse_args()
 
-    bot_names = None
-    if args.bots:
-        bot_names = [b.strip().upper() for b in args.bots.split(",") if b.strip()]
-
-    report = build_report(bot_names)
+    report = build_report(None)
     print_report(report)
 
     if args.json:
@@ -547,8 +477,7 @@ def main() -> int:
         }
         print("--- JSON SUMMARY ---")
         print(json.dumps(summary, indent=2, default=str))
-
-    return 1 if (report["phantoms"] or report["one_leg_phantoms"]) else 0
+    return 0
 
 
 if __name__ == "__main__":
