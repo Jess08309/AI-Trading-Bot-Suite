@@ -21,14 +21,10 @@ fi
 
 echo ""
 echo "=== Retired service cleanup ==="
-for s in putseller spreadbot alpacabot callbuyer; do
-    sudo systemctl stop "$s" 2>/dev/null || true
-    sudo systemctl disable "$s" 2>/dev/null || true
-done
+sudo /home/botuser/AI-Trading-Bot-Suite/CryptoBot/deploy/oracle/cleanup_retired_units.sh
 
 echo ""
 echo "=== Restarting active services ==="
-sudo systemctl daemon-reload
 sudo systemctl restart cryptobot
 sudo systemctl restart bot-watchdog.timer
 

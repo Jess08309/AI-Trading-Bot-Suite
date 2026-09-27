@@ -109,7 +109,7 @@ fi
 #  5. Enforce retired service cleanup + restart active services
 # ---------------------------------------------------------------------------
 log "Stopping/disabling retired services (if present)..."
-$SSH "${BOT_USER}@${SERVER_IP}" 'for unit in putseller.service putseller.timer spreadbot.service spreadbot.timer alpacabot.service alpacabot.timer callbuyer.service callbuyer.timer; do sudo systemctl stop "$unit" 2>/dev/null || true; sudo systemctl disable "$unit" 2>/dev/null || true; sudo rm -f /etc/systemd/system/"$unit" /lib/systemd/system/"$unit" /usr/lib/systemd/system/"$unit"; for link_dir in /etc/systemd/system/*.wants /etc/systemd/system/*.requires; do [ -d "$link_dir" ] || continue; sudo rm -f "$link_dir/$unit"; done; sudo systemctl reset-failed "$unit" 2>/dev/null || true; done; sudo systemctl daemon-reload'
+$SSH "${BOT_USER}@${SERVER_IP}" 'sudo ~/AI-Trading-Bot-Suite/CryptoBot/deploy/oracle/cleanup_retired_units.sh'
 
 log "Restarting active services..."
 $SSH "${BOT_USER}@${SERVER_IP}" 'sudo systemctl daemon-reload; sudo systemctl restart cryptobot; sudo systemctl restart bot-watchdog.timer'

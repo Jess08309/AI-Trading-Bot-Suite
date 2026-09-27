@@ -13,6 +13,7 @@ fi
 
 BOT_USER="botuser"
 BOT_HOME="/home/${BOT_USER}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "========================================="
 echo "  Trading Bot Server Setup (ARM/aarch64)"
@@ -63,20 +64,7 @@ CLONE_SCRIPT
 
 # --- Remove retired bot services if they still exist ---
 echo "[5/8] Cleaning up retired bot services..."
-retired_units=(putseller spreadbot alpacabot callbuyer)
-for svc in "${retired_units[@]}"; do
-    for ext in service timer; do
-        unit="${svc}.${ext}"
-        systemctl disable --now "$unit" 2>/dev/null || true
-        rm -f "/etc/systemd/system/${unit}" "/lib/systemd/system/${unit}" "/usr/lib/systemd/system/${unit}"
-        for link_dir in /etc/systemd/system/*.wants /etc/systemd/system/*.requires; do
-            [ -d "$link_dir" ] || continue
-            rm -f "$link_dir/$unit"
-        done
-        systemctl reset-failed "$unit" 2>/dev/null || true
-    done
-done
-systemctl daemon-reload
+"${SCRIPT_DIR}/cleanup_retired_units.sh"
 
 
 # --- Create virtual environment & install deps ---
@@ -106,7 +94,6 @@ DIR_SCRIPT
 
 # --- Install systemd services ---
 echo "[8/8] Installing systemd services..."
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 for SVC in cryptobot bot-watchdog; do
     if [ -f "${SCRIPT_DIR}/${SVC}.service" ]; then
