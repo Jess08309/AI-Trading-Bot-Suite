@@ -47,6 +47,11 @@ simplifications):
   - Only 1 position per underlying at a time (not stated explicitly in the
     spec, but implied by "sell 1 put" per entry plus the position/sector caps
     only being meaningful if a single name can't be re-entered indefinitely).
+
+EXIT RULES UPDATED (2026-09-26): the original 21-DTE exit was found to force
+early closes before theta acceleration could play out (-$3,515 across 89
+trades in the first backtest). Per explicit instruction, DTE_EXIT is now 10
+(not 21) -- profit target, stop loss, and expiration-handling are unchanged.
 """
 from __future__ import annotations
 
@@ -99,7 +104,7 @@ MAX_PORTFOLIO_DELTA = 100.0        # shares-equivalent units (per-contract delta
 
 # ---- Exits (checked in this literal priority order every day) ----
 TAKE_PROFIT_PCT = 0.50
-DTE_EXIT = 21
+DTE_EXIT = 10                      # was 21 -- forced early closes before theta acceleration
 STOP_LOSS_PCT_BELOW_STRIKE = 0.10
 
 START_CASH = 100_000.0
@@ -231,7 +236,7 @@ def run_backtest(start: str, end: str, verbose: bool = False) -> dict:
                 elif S <= pos.strike * (1 - STOP_LOSS_PCT_BELOW_STRIKE):
                     reason = "STOP_LOSS (10% below strike)"
                 elif dte_remaining <= 0:
-                    # Expected to be unreachable given DTE_EXIT=21 always closes
+                    # Expected to be unreachable given DTE_EXIT always closes
                     # first -- kept for spec-completeness/safety, same pattern as
                     # Config G's documented-dead exit branches (AlpacaBot research).
                     if S > pos.strike:
