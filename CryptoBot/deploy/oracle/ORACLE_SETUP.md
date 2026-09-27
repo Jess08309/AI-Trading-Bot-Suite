@@ -2,7 +2,7 @@
 
 ## What You Get (Free Forever)
 - **ARM instance**: 4 OCPU (cores), 24 GB RAM, 200 GB disk
-- More than enough for all 4 bots (they use ~200MB RAM each)
+- More than enough for CryptoBot (uses ~200MB RAM)
 - No credit card charges — truly free tier (card required for signup verification only)
 
 ---
@@ -129,12 +129,12 @@ Both scripts do the same thing:
 2. Pull it on the server
 3. Copy .env files (API keys)
 4. Copy state files (positions, balances)
-5. Run setup_server.sh (install Python, create venvs, install deps, enable services)
-6. Start all bots
+5. Run setup_server.sh (install Python, create venv, install deps, enable services)
+6. Start the bot
 
-> **Repo layout**: this is a single monorepo (`AI-Trading-Bot-Suite`) containing all 4
-> bots as subfolders. The server clones it once to `~/AI-Trading-Bot-Suite` — there are
-> no more separate per-bot repos.
+> **Repo layout**: this is a single monorepo (`AI-Trading-Bot-Suite`) containing
+> CryptoBot, the repository's only active bot since the 2026-09-27 portfolio
+> consolidation. The server clones it once to `~/AI-Trading-Bot-Suite`.
 
 ---
 
@@ -147,12 +147,10 @@ ssh -i "$env:USERPROFILE\.ssh\oracle_bot_key" botuser@<YOUR_SERVER_IP>
 On the server:
 ```bash
 # Check service status
-sudo systemctl status cryptobot putseller callbuyer
+sudo systemctl status cryptobot
 
 # Watch live logs
 journalctl -u cryptobot -f           # CryptoBot logs
-journalctl -u putseller -f           # PutSeller logs
-journalctl -u callbuyer -f           # CallBuyer logs
 
 # Check watchdog timer
 sudo systemctl status bot-watchdog.timer
@@ -183,24 +181,21 @@ always-on server you deploy to via the scripts above) is what keeps the bots run
 your laptop is off or asleep — the Codespace should only be used for development, not as
 the production host.
 
-### Stop/start individual bot:
+### Stop/start the bot:
 ```bash
-sudo systemctl stop putseller
-sudo systemctl start putseller
+sudo systemctl stop cryptobot
+sudo systemctl start cryptobot
 ```
 
 ### View recent logs:
 ```bash
 journalctl -u cryptobot --since "1 hour ago"
-journalctl -u putseller --since today
 ```
 
-### Check if bots survived a reboot:
+### Check if the bot survived a reboot:
 ```bash
-# systemd auto-starts them on boot — just verify:
-for s in cryptobot putseller callbuyer; do
-    printf "%-12s %s\n" "$s" "$(systemctl is-active $s)"
-done
+# systemd auto-starts it on boot — just verify:
+systemctl is-active cryptobot
 ```
 
 ---

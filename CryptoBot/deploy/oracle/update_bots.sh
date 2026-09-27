@@ -10,7 +10,7 @@ cd "/home/botuser/AI-Trading-Bot-Suite"
 git pull --ff-only
 CHANGED_FILES=$(git diff HEAD@{1} --name-only 2>/dev/null || true)
 
-for BOT in CryptoBot PutSeller CallBuyer AlpacaBot; do
+for BOT in CryptoBot; do
     if echo "$CHANGED_FILES" | grep -q "^${BOT}/requirements.txt$"; then
         echo "  ${BOT}/requirements.txt changed — reinstalling..."
         cd "/home/botuser/AI-Trading-Bot-Suite/${BOT}"
@@ -23,10 +23,10 @@ done
 
 echo ""
 echo "=== Restarting services ==="
-sudo systemctl restart cryptobot putseller callbuyer alpacabot
+sudo systemctl restart cryptobot
 
 echo ""
 echo "=== Status ==="
-for s in cryptobot putseller callbuyer alpacabot; do
+for s in cryptobot; do
     printf "%-12s %s\n" "$s" "$(systemctl is-active $s 2>/dev/null)"
 done

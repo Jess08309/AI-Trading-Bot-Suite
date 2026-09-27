@@ -14,7 +14,7 @@ echo "  Trading Bot Server Setup (ARM/aarch64)"
 echo "========================================="
 
 # --- System packages ---
-echo "[1/7] Installing system packages..."
+echo "[1/8] Installing system packages..."
 apt-get update -qq
 apt-get install -y -qq \
     python3 python3-venv python3-dev python3-full \
@@ -24,7 +24,7 @@ PYTHON=$(command -v python3)
 echo "  Using Python: $PYTHON ($($PYTHON --version))"
 
 # --- Create bot user ---
-echo "[2/7] Creating bot user..."
+echo "[2/8] Creating bot user..."
 if ! id "$BOT_USER" &>/dev/null; then
     useradd -m -s /bin/bash "$BOT_USER"
     echo "  Created user: $BOT_USER"
@@ -33,7 +33,7 @@ else
 fi
 
 # --- Firewall (no inbound ports needed — bots only make outbound calls) ---
-echo "[3/7] Configuring firewall..."
+echo "[3/8] Configuring firewall..."
 ufw default deny incoming > /dev/null
 ufw default allow outgoing > /dev/null
 ufw allow ssh > /dev/null
@@ -41,7 +41,7 @@ ufw --force enable > /dev/null
 echo "  UFW: deny incoming, allow outgoing, allow SSH"
 
 # --- Clone repository ---
-echo "[4/7] Cloning bot repository (monorepo)..."
+echo "[4/8] Cloning bot repository (monorepo)..."
 sudo -u "$BOT_USER" bash <<'CLONE_SCRIPT'
 cd ~
 REPO_URL="https://github.com/Jess08309/AI-Trading-Bot-Suite.git"
@@ -57,11 +57,11 @@ fi
 CLONE_SCRIPT
 
 # --- Create virtual environments & install deps ---
-echo "[5/7] Setting up Python virtual environments..."
+echo "[5/8] Setting up Python virtual environments..."
 PYTHON_PATH=$PYTHON
 sudo -u "$BOT_USER" bash <<VENV_SCRIPT
 cd ~/AI-Trading-Bot-Suite
-for BOT in CryptoBot PutSeller CallBuyer AlpacaBot; do
+for BOT in CryptoBot; do
     echo "  \$BOT: creating venv..."
     cd ~/AI-Trading-Bot-Suite/\$BOT
     $PYTHON_PATH -m venv .venv
@@ -76,7 +76,7 @@ done
 VENV_SCRIPT
 
 # --- Create required directories ---
-echo "[6/7] Creating data directories..."
+echo "[6/8] Creating data directories..."
 sudo -u "$BOT_USER" bash <<'DIR_SCRIPT'
 cd ~/AI-Trading-Bot-Suite
 
@@ -86,28 +86,13 @@ mkdir -p ~/AI-Trading-Bot-Suite/CryptoBot/cryptotrades/data/state
 mkdir -p ~/AI-Trading-Bot-Suite/CryptoBot/cryptotrades/data/models
 mkdir -p ~/AI-Trading-Bot-Suite/CryptoBot/data/state
 mkdir -p ~/AI-Trading-Bot-Suite/CryptoBot/reports
-
-# PutSeller directories
-mkdir -p ~/AI-Trading-Bot-Suite/PutSeller/logs
-mkdir -p ~/AI-Trading-Bot-Suite/PutSeller/data/state
-mkdir -p ~/AI-Trading-Bot-Suite/PutSeller/reports
-
-# CallBuyer directories
-mkdir -p ~/AI-Trading-Bot-Suite/CallBuyer/logs
-mkdir -p ~/AI-Trading-Bot-Suite/CallBuyer/data/state
-mkdir -p ~/AI-Trading-Bot-Suite/CallBuyer/reports
-
-# AlpacaBot directories
-mkdir -p ~/AI-Trading-Bot-Suite/AlpacaBot/logs
-mkdir -p ~/AI-Trading-Bot-Suite/AlpacaBot/data/state
-mkdir -p ~/AI-Trading-Bot-Suite/AlpacaBot/reports
 DIR_SCRIPT
 
 # --- Install systemd services ---
-echo "[7/7] Installing systemd services..."
+echo "[7/8] Installing systemd services..."
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-for SVC in cryptobot putseller callbuyer alpacabot bot-watchdog; do
+for SVC in cryptobot bot-watchdog; do
     if [ -f "${SCRIPT_DIR}/${SVC}.service" ]; then
         cp "${SCRIPT_DIR}/${SVC}.service" /etc/systemd/system/
         echo "  Installed ${SVC}.service"
@@ -121,8 +106,24 @@ fi
 
 systemctl daemon-reload
 
-# Enable all services
-systemctl enable cryptobot putseller callbuyer alpacabot bot-watchdog.timer
+# Enable the (single) bot service + watchdog
+systemctl enable cryptobot bot-watchdog.timer
+
+# --- Retire old bot units (portfolio consolidation, 2026-09-27) ---
+# PutSeller, CallBuyer, and AlpacaBot were retired; if this droplet was
+# provisioned before the consolidation it may still have their units
+# installed and enabled. Stop/disable/remove them so nothing stale can
+# restart on the next reboot or watchdog cycle. See archive/README.md.
+echo "[8/8] Retiring old bot units (if present)..."
+for SVC in putseller callbuyer alpacabot spreadbot; do
+    if systemctl list-unit-files "${SVC}.service" 2>/dev/null | grep -q "${SVC}.service"; then
+        echo "  Found leftover ${SVC}.service — stopping/disabling/removing..."
+        systemctl stop "${SVC}" 2>/dev/null || true
+        systemctl disable "${SVC}" 2>/dev/null || true
+        rm -f "/etc/systemd/system/${SVC}.service"
+    fi
+done
+systemctl daemon-reload
 
 echo ""
 echo "========================================="
@@ -131,18 +132,15 @@ echo "========================================="
 echo ""
 echo "NEXT STEPS:"
 echo "  1. Copy .env files to the server (run ./deploy.sh from the repo, or manually):"
-echo "     scp AlpacaBot/.env                   botuser@<IP>:~/AI-Trading-Bot-Suite/AlpacaBot/.env"
-echo "     scp PutSeller/.env                   botuser@<IP>:~/AI-Trading-Bot-Suite/PutSeller/.env"
-echo "     scp CallBuyer/.env                   botuser@<IP>:~/AI-Trading-Bot-Suite/CallBuyer/.env"
 echo "     scp CryptoBot/cryptotrades/.env      botuser@<IP>:~/AI-Trading-Bot-Suite/CryptoBot/cryptotrades/.env"
 echo ""
 echo "  2. Copy state files (paper balances, positions, etc.) — use deploy.sh -SyncState"
 echo ""
-echo "  3. Start the bots:"
-echo "     sudo systemctl start cryptobot putseller callbuyer alpacabot"
+echo "  3. Start the bot:"
+echo "     sudo systemctl start cryptobot"
 echo "     sudo systemctl start bot-watchdog.timer"
 echo ""
 echo "  4. Check status:"
-echo "     sudo systemctl status cryptobot putseller callbuyer alpacabot"
+echo "     sudo systemctl status cryptobot"
 echo "     journalctl -u cryptobot -f   (live logs)"
 echo ""
