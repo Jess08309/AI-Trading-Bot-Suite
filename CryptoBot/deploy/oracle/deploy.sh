@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-#  Deploy bots to Oracle Cloud server from Linux/macOS/Codespace
+#  Deploy CryptoBot to Oracle Cloud server from Linux/macOS/Codespace
 #  Usage: ./deploy.sh <SERVER_IP> [--first-deploy] [--sync-state] [--key <path>]
 #  Run from anywhere inside the repo (path is resolved relative to this script)
 # ============================================================================
@@ -58,9 +58,6 @@ $SSH "${BOT_USER}@${SERVER_IP}" 'cd ~/AI-Trading-Bot-Suite && git pull --ff-only
 log "Syncing .env files..."
 
 declare -A ENV_FILES=(
-    ["${REPO_ROOT}/AlpacaBot/.env"]="AI-Trading-Bot-Suite/AlpacaBot/.env"
-    ["${REPO_ROOT}/PutSeller/.env"]="AI-Trading-Bot-Suite/PutSeller/.env"
-    ["${REPO_ROOT}/CallBuyer/.env"]="AI-Trading-Bot-Suite/CallBuyer/.env"
     ["${REPO_ROOT}/CryptoBot/cryptotrades/.env"]="AI-Trading-Bot-Suite/CryptoBot/cryptotrades/.env"
 )
 
@@ -81,10 +78,6 @@ if [ "$SYNC_STATE" = true ]; then
     declare -A STATE_FILES=(
         ["${REPO_ROOT}/CryptoBot/cryptotrades/data/state/paper_balances.json"]="AI-Trading-Bot-Suite/CryptoBot/cryptotrades/data/state/"
         ["${REPO_ROOT}/CryptoBot/cryptotrades/data/state/locked_profile.json"]="AI-Trading-Bot-Suite/CryptoBot/cryptotrades/data/state/"
-        ["${REPO_ROOT}/PutSeller/data/state/positions.json"]="AI-Trading-Bot-Suite/PutSeller/data/state/"
-        ["${REPO_ROOT}/PutSeller/data/state/bot_state.json"]="AI-Trading-Bot-Suite/PutSeller/data/state/"
-        ["${REPO_ROOT}/CallBuyer/data/state/bot_state.json"]="AI-Trading-Bot-Suite/CallBuyer/data/state/"
-        ["${REPO_ROOT}/AlpacaBot/data/state/bot_state.json"]="AI-Trading-Bot-Suite/AlpacaBot/data/state/"
     )
 
     for src in "${!STATE_FILES[@]}"; do
@@ -113,12 +106,15 @@ if [ "$FIRST_DEPLOY" = true ]; then
 fi
 
 # ---------------------------------------------------------------------------
-#  5. Restart services
+#  5. Enforce retired service cleanup + restart active services
 # ---------------------------------------------------------------------------
-log "Restarting bot services..."
-$SSH "${BOT_USER}@${SERVER_IP}" 'sudo systemctl restart cryptobot putseller callbuyer alpacabot; sudo systemctl start bot-watchdog.timer'
+log "Stopping/disabling retired services (if present)..."
+$SSH "${BOT_USER}@${SERVER_IP}" 'for s in putseller spreadbot alpacabot callbuyer; do sudo systemctl stop "$s" 2>/dev/null || true; sudo systemctl disable "$s" 2>/dev/null || true; done'
+
+log "Restarting active services..."
+$SSH "${BOT_USER}@${SERVER_IP}" 'sudo systemctl restart cryptobot; sudo systemctl start bot-watchdog.timer'
 
 log "Checking status..."
-$SSH "${BOT_USER}@${SERVER_IP}" 'for s in cryptobot putseller callbuyer alpacabot; do printf "%-12s %s\n" "$s" "$(systemctl is-active "$s")"; done'
+$SSH "${BOT_USER}@${SERVER_IP}" 'printf "%-12s %s\n" "cryptobot" "$(systemctl is-active cryptobot)"; printf "%-12s %s\n" "watchdog" "$(systemctl is-active bot-watchdog.timer)"; for s in putseller spreadbot alpacabot callbuyer; do printf "%-12s %s\n" "$s" "$(systemctl is-enabled "$s" 2>/dev/null || echo not-installed)"; done'
 
 log "Deploy complete!"

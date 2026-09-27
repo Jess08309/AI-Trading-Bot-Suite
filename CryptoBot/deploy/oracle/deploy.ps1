@@ -1,5 +1,5 @@
 # ============================================================================
-#  Deploy bots to Oracle Cloud server from Windows
+#  Deploy CryptoBot to Oracle Cloud server from Windows
 #  Usage: .\deploy.ps1 -ServerIP <IP> [-KeyFile <path>] [-SyncState] [-FirstDeploy]
 #  Run from anywhere inside the repo (path is resolved relative to this script)
 # ============================================================================
@@ -45,10 +45,7 @@ Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'cd ~/AI-Trading-Bot-Suite && gi
 Log "Syncing .env files..."
 
 $envFiles = @(
-    @("$RepoRoot\AlpacaBot\.env",               "AI-Trading-Bot-Suite/AlpacaBot/.env"),
-    @("$RepoRoot\PutSeller\.env",               "AI-Trading-Bot-Suite/PutSeller/.env"),
-    @("$RepoRoot\CallBuyer\.env",                "AI-Trading-Bot-Suite/CallBuyer/.env"),
-    @("$RepoRoot\CryptoBot\cryptotrades\.env",  "AI-Trading-Bot-Suite/CryptoBot/cryptotrades/.env")
+    @("$RepoRoot\CryptoBot\cryptotrades\.env", "AI-Trading-Bot-Suite/CryptoBot/cryptotrades/.env")
 )
 
 foreach ($pair in $envFiles) {
@@ -68,11 +65,7 @@ if ($SyncState) {
 
     $stateFiles = @(
         @("$RepoRoot\CryptoBot\cryptotrades\data\state\paper_balances.json", "AI-Trading-Bot-Suite/CryptoBot/cryptotrades/data/state/"),
-        @("$RepoRoot\CryptoBot\cryptotrades\data\state\locked_profile.json", "AI-Trading-Bot-Suite/CryptoBot/cryptotrades/data/state/"),
-        @("$RepoRoot\PutSeller\data\state\positions.json",                  "AI-Trading-Bot-Suite/PutSeller/data/state/"),
-        @("$RepoRoot\PutSeller\data\state\bot_state.json",                  "AI-Trading-Bot-Suite/PutSeller/data/state/"),
-        @("$RepoRoot\CallBuyer\data\state\bot_state.json",                  "AI-Trading-Bot-Suite/CallBuyer/data/state/"),
-        @("$RepoRoot\AlpacaBot\data\state\bot_state.json",                  "AI-Trading-Bot-Suite/AlpacaBot/data/state/")
+        @("$RepoRoot\CryptoBot\cryptotrades\data\state\locked_profile.json", "AI-Trading-Bot-Suite/CryptoBot/cryptotrades/data/state/")
     )
 
     foreach ($pair in $stateFiles) {
@@ -103,12 +96,15 @@ if ($FirstDeploy) {
 }
 
 # ---------------------------------------------------------------------------
-#  5. Restart services
+#  5. Enforce retired service cleanup + restart active services
 # ---------------------------------------------------------------------------
-Log "Restarting bot services..."
-Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'sudo systemctl restart cryptobot putseller callbuyer alpacabot 2>&1; sudo systemctl start bot-watchdog.timer 2>&1'"
+Log "Stopping/disabling retired services (if present)..."
+Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'for s in putseller spreadbot alpacabot callbuyer; do sudo systemctl stop `$s 2>/dev/null || true; sudo systemctl disable `$s 2>/dev/null || true; done'"
+
+Log "Restarting active services..."
+Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'sudo systemctl restart cryptobot 2>&1; sudo systemctl start bot-watchdog.timer 2>&1'"
 
 Log "Checking status..."
-Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'for s in cryptobot putseller callbuyer alpacabot; do printf ""%-12s %s\n"" `$s `$(systemctl is-active `$s); done'"
+Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'printf ""%-12s %s\n"" ""cryptobot"" ""`$(systemctl is-active cryptobot)""; printf ""%-12s %s\n"" ""watchdog"" ""`$(systemctl is-active bot-watchdog.timer)""; for s in putseller spreadbot alpacabot callbuyer; do printf ""%-12s %s\n"" `$s ""`$(systemctl is-enabled `$s 2>/dev/null || echo not-installed)""; done'"
 
 Log "Deploy complete!"
