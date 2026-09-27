@@ -3,7 +3,11 @@
 #
 # Collects a point-in-time, NON-SECRET operational snapshot of this droplet
 # (systemd service status, live git commit, and locally-stored trade/PnL
-# summary counts for all 4 bots) and writes it to a local JSON file.
+# summary counts) and writes it to a local JSON file.
+#
+# As of the 2026-09-27 portfolio consolidation, this repo runs a single bot
+# (CryptoBot) -- this script previously covered 4 services and has been
+# scoped down to match.
 #
 # SECURITY NOTE: this script intentionally does NOT read/print/embed any API
 # keys, secrets, .env contents, or account numbers, and it does NOT push
@@ -22,7 +26,7 @@ set -euo pipefail
 
 REPO_DIR="/home/botuser/AI-Trading-Bot-Suite"
 OUT_PATH="${1:-/home/botuser/droplet_state_snapshot.json}"
-SERVICES=(alpacabot cryptobot putseller callbuyer)
+SERVICES=(cryptobot)
 
 timestamp_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
