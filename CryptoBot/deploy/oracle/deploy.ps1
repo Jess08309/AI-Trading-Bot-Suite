@@ -99,7 +99,7 @@ if ($FirstDeploy) {
 #  5. Enforce retired service cleanup + restart active services
 # ---------------------------------------------------------------------------
 Log "Stopping/disabling retired services (if present)..."
-Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'sudo ~/AI-Trading-Bot-Suite/CryptoBot/deploy/oracle/cleanup_retired_units.sh'"
+Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'sudo /home/botuser/AI-Trading-Bot-Suite/CryptoBot/deploy/oracle/cleanup_retired_units.sh'"
 
 Log "Restarting active services..."
 Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'sudo systemctl restart cryptobot 2>&1; sudo systemctl restart bot-watchdog.timer 2>&1'"

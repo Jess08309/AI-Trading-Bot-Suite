@@ -109,7 +109,7 @@ fi
 #  5. Enforce retired service cleanup + restart active services
 # ---------------------------------------------------------------------------
 log "Stopping/disabling retired services (if present)..."
-$SSH "${BOT_USER}@${SERVER_IP}" 'sudo ~/AI-Trading-Bot-Suite/CryptoBot/deploy/oracle/cleanup_retired_units.sh'
+$SSH "${BOT_USER}@${SERVER_IP}" 'sudo /home/botuser/AI-Trading-Bot-Suite/CryptoBot/deploy/oracle/cleanup_retired_units.sh'
 
 log "Restarting active services..."
 $SSH "${BOT_USER}@${SERVER_IP}" 'sudo systemctl daemon-reload; sudo systemctl restart cryptobot; sudo systemctl restart bot-watchdog.timer'
