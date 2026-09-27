@@ -142,6 +142,8 @@ class TradingConfig:
     CB_FAST_WINDOW_TRADES: int = 5         # window size to check recent P/L
     CB_FAST_PNL_THRESHOLD: float = -2.0    # % P/L over window to trigger pause
     CB_FAST_COOLDOWN_MIN: int = 30         # minutes to pause when fast guard trips
+    SYMBOL_UNCONFIRMED_FILL_STRIKES: int = 3
+    SYMBOL_UNCONFIRMED_FILL_COOLDOWN_HOURS: float = 4.0
 
     # ── Volatility Scaling ─────────────────────────────
     VOL_WINDOW: int = 20                   # trades to measure realized vol
@@ -322,6 +324,12 @@ class TradingConfig:
         self.CB_DAILY_LOSS_LIMIT_PCT = _env_float("CB_DAILY_LOSS_LIMIT_PCT", self.CB_DAILY_LOSS_LIMIT_PCT)
         self.CB_MAX_DRAWDOWN_PCT = _env_float("MAX_DRAWDOWN_THRESHOLD", self.CB_MAX_DRAWDOWN_PCT)
         self.CB_COOLDOWN_MINUTES = _env_int("CB_COOLDOWN_MINUTES", self.CB_COOLDOWN_MINUTES)
+        self.SYMBOL_UNCONFIRMED_FILL_STRIKES = _env_int(
+            "SYMBOL_UNCONFIRMED_FILL_STRIKES", self.SYMBOL_UNCONFIRMED_FILL_STRIKES
+        )
+        self.SYMBOL_UNCONFIRMED_FILL_COOLDOWN_HOURS = _env_float(
+            "SYMBOL_UNCONFIRMED_FILL_COOLDOWN_HOURS", self.SYMBOL_UNCONFIRMED_FILL_COOLDOWN_HOURS
+        )
 
         self.RL_LEARNING_RATE = _env_float("RL_LEARNING_RATE", self.RL_LEARNING_RATE)
         self.RL_EXPLORATION_RATE = _env_float("RL_EXPLORATION_RATE", self.RL_EXPLORATION_RATE)

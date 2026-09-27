@@ -168,6 +168,8 @@ class TradingConfig:
     COUNTER_TREND_ML_OVERRIDE: float = 0.56  # ML conf above this can trade against trend (was 0.62, 0.80)
     MIN_MODEL_TEST_ACCURACY: float = 0.55  # Reject models below this OOS accuracy
     SYMBOL_PAUSE_CONSECUTIVE_LOSSES: int = 4  # Pause symbol after 4 straight losses (was 3)
+    SYMBOL_UNCONFIRMED_FILL_STRIKES: int = 3
+    SYMBOL_UNCONFIRMED_FILL_COOLDOWN_HOURS: float = 4.0
 
     # Direction Performance Tracker — auto-pause losing direction
     DIRECTION_PAUSE_LOOKBACK: int = 20     # Rolling window of recent trades per direction
@@ -292,6 +294,12 @@ class TradingConfig:
         self.FUTURES_TAKE_PROFIT = _env_float("FUTURES_TAKE_PROFIT_OVERRIDE", self.FUTURES_TAKE_PROFIT)
         self.TRAILING_ACTIVATE_PCT = _env_float("TRAILING_ACTIVATE_PCT_OVERRIDE", self.TRAILING_ACTIVATE_PCT)
         self.SYMBOL_PAUSE_CONSECUTIVE_LOSSES = _env_int("SYMBOL_PAUSE_CONSECUTIVE_LOSSES_OVERRIDE", self.SYMBOL_PAUSE_CONSECUTIVE_LOSSES)
+        self.SYMBOL_UNCONFIRMED_FILL_STRIKES = _env_int(
+            "SYMBOL_UNCONFIRMED_FILL_STRIKES_OVERRIDE", self.SYMBOL_UNCONFIRMED_FILL_STRIKES
+        )
+        self.SYMBOL_UNCONFIRMED_FILL_COOLDOWN_HOURS = _env_float(
+            "SYMBOL_UNCONFIRMED_FILL_COOLDOWN_HOURS_OVERRIDE", self.SYMBOL_UNCONFIRMED_FILL_COOLDOWN_HOURS
+        )
         self.MAX_POSITION_PCT = _env_float("MAX_POSITION_PCT_OVERRIDE", self.MAX_POSITION_PCT)
         self.MIN_POSITION_PCT = _env_float("MIN_POSITION_PCT_OVERRIDE", self.MIN_POSITION_PCT)
         self.STOP_LOSS_PCT = _env_float("STOP_LOSS_PCT_OVERRIDE", self.STOP_LOSS_PCT)
@@ -1525,6 +1533,8 @@ class TradingBot:
         # Per-symbol loss tracking for auto-pause
         self.symbol_consecutive_losses: Dict[str, int] = {}
         self.symbol_paused_until: Dict[str, datetime] = {}
+        self.symbol_unconfirmed_fill_strikes: Dict[str, int] = {}
+        self.symbol_unconfirmed_fill_paused_until: Dict[str, datetime] = {}
 
         # Per-direction performance tracker
         self.direction_recent_results: Dict[str, List[bool]] = {"LONG": [], "SHORT": []}
@@ -2413,10 +2423,12 @@ class TradingBot:
             for _ in range(6):
                 filled = getattr(order, "filled_qty", None)
                 if filled and float(filled) > 0:
+                    self._reset_symbol_unconfirmed_fill_strikes(symbol)
                     self.logger.info(f"ALPACA ORDER: BUY {symbol} filled_qty={filled} order_id={order.id}")
                     return float(filled)
                 time.sleep(2)
                 order = self.trading_client.get_order_by_id(order.id)
+            self._record_symbol_unconfirmed_fill(symbol, reason="unconfirmed_fill")
             self.logger.warning(
                 f"ALPACA ORDER: BUY {symbol} submitted (id={order.id}) but fill NOT CONFIRMED "
                 f"after poll window — treating as unfilled, will NOT be tracked as a position"
@@ -2427,6 +2439,7 @@ class TradingBot:
                 pass  # best-effort — order may have already filled/expired
             return 0.0
         except Exception as e:
+            self._record_symbol_unconfirmed_fill(symbol, reason="submit_error")
             self.logger.error(f"ALPACA ORDER FAILED: BUY {symbol} notional=${notional:.2f}: {e}")
             return 0.0
 
@@ -2625,6 +2638,32 @@ class TradingBot:
             self.logger.warning(f"Could not load balances: {e}")
 
         try:
+            pause_state_path = os.path.join(_state, "symbol_pause_state.json")
+            if os.path.exists(pause_state_path):
+                with open(pause_state_path, 'r') as f:
+                    pause_state = json.load(f)
+                self.symbol_consecutive_losses = {
+                    str(k): int(v)
+                    for k, v in (pause_state.get("symbol_consecutive_losses", {}) or {}).items()
+                }
+                self.symbol_paused_until = {}
+                for symbol, raw_until in (pause_state.get("symbol_paused_until", {}) or {}).items():
+                    parsed = self._parse_datetime(raw_until)
+                    if parsed is not None:
+                        self.symbol_paused_until[str(symbol)] = parsed
+                self.symbol_unconfirmed_fill_strikes = {
+                    str(k): int(v)
+                    for k, v in (pause_state.get("symbol_unconfirmed_fill_strikes", {}) or {}).items()
+                }
+                self.symbol_unconfirmed_fill_paused_until = {}
+                for symbol, raw_until in (pause_state.get("symbol_unconfirmed_fill_paused_until", {}) or {}).items():
+                    parsed = self._parse_datetime(raw_until)
+                    if parsed is not None:
+                        self.symbol_unconfirmed_fill_paused_until[str(symbol)] = parsed
+        except Exception as e:
+            self.logger.warning(f"Could not load symbol pause state: {e}")
+
+        try:
             spot_hist_path = os.path.join(_state, "spot_price_history.json")
             if os.path.exists(spot_hist_path):
                 with open(spot_hist_path, 'r') as f:
@@ -2778,6 +2817,20 @@ class TradingBot:
                 "daily_pnl": round(self.risk_manager.daily_pnl, 4),
                 "consecutive_losses": self.risk_manager.consecutive_losses,
                 "daily_pnl_date": self.risk_manager.last_reset.date().isoformat(),
+            })
+            _atomic_write(os.path.join(_state, "symbol_pause_state.json"), {
+                "symbol_consecutive_losses": {
+                    k: int(v) for k, v in self.symbol_consecutive_losses.items()
+                },
+                "symbol_paused_until": {
+                    k: v.isoformat() for k, v in self.symbol_paused_until.items()
+                },
+                "symbol_unconfirmed_fill_strikes": {
+                    k: int(v) for k, v in self.symbol_unconfirmed_fill_strikes.items()
+                },
+                "symbol_unconfirmed_fill_paused_until": {
+                    k: v.isoformat() for k, v in self.symbol_unconfirmed_fill_paused_until.items()
+                },
             })
 
             serializable_history = {
@@ -3536,6 +3589,8 @@ class TradingBot:
 
     def _is_symbol_paused(self, symbol: str) -> bool:
         """Check if symbol is auto-paused due to consecutive losses."""
+        if self._is_symbol_unconfirmed_fill_paused(symbol):
+            return True
         pause_until = self.symbol_paused_until.get(symbol)
         if pause_until and datetime.now() < pause_until:
             return True
@@ -3561,6 +3616,45 @@ class TradingBot:
                     f"AUTO-PAUSE: {base_symbol} paused for {pause_hours}h after "
                     f"{self.symbol_consecutive_losses[base_symbol]} consecutive losses"
                 )
+
+    def _is_symbol_unconfirmed_fill_paused(self, symbol: str) -> bool:
+        """Check if symbol entries are paused due to repeated unconfirmed buy fills."""
+        base_symbol = symbol.split('__')[0]
+        pause_until = self.symbol_unconfirmed_fill_paused_until.get(base_symbol)
+        if pause_until and datetime.now() < pause_until:
+            return True
+        if pause_until:
+            del self.symbol_unconfirmed_fill_paused_until[base_symbol]
+            self.symbol_unconfirmed_fill_strikes[base_symbol] = 0
+            self.logger.info(f"ENTRY RE-ENABLED: {base_symbol} unconfirmed-fill cooldown expired")
+        return False
+
+    def _record_symbol_unconfirmed_fill(self, symbol: str, reason: str = "unconfirmed_fill"):
+        """Track unconfirmed Alpaca spot buy fills and pause entries after repeated strikes."""
+        base_symbol = symbol.split('__')[0]
+        strikes = self.symbol_unconfirmed_fill_strikes.get(base_symbol, 0) + 1
+        self.symbol_unconfirmed_fill_strikes[base_symbol] = strikes
+        self.logger.warning(
+            f"UNCONFIRMED BUY FILL STRIKE {strikes}/{cfg.SYMBOL_UNCONFIRMED_FILL_STRIKES}: "
+            f"{base_symbol} ({reason})"
+        )
+        if strikes >= cfg.SYMBOL_UNCONFIRMED_FILL_STRIKES:
+            pause_until = datetime.now() + timedelta(hours=cfg.SYMBOL_UNCONFIRMED_FILL_COOLDOWN_HOURS)
+            self.symbol_unconfirmed_fill_paused_until[base_symbol] = pause_until
+            self.logger.warning(
+                f"ENTRY BLOCKED: {base_symbol} — {strikes} consecutive unconfirmed fills, "
+                f"paused until {pause_until.isoformat()}"
+            )
+
+    def _reset_symbol_unconfirmed_fill_strikes(self, symbol: str):
+        """Reset unconfirmed-fill strike tracking after a confirmed fill."""
+        base_symbol = symbol.split('__')[0]
+        prior = self.symbol_unconfirmed_fill_strikes.get(base_symbol, 0)
+        self.symbol_unconfirmed_fill_strikes[base_symbol] = 0
+        if base_symbol in self.symbol_unconfirmed_fill_paused_until:
+            del self.symbol_unconfirmed_fill_paused_until[base_symbol]
+        if prior > 0:
+            self.logger.info(f"UNCONFIRMED BUY FILL STRIKES RESET: {base_symbol} after confirmed fill")
 
     def _record_direction_result(self, direction: str, is_win: bool):
         """Track per-direction rolling win rate for adaptive pause."""

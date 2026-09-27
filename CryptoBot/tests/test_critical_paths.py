@@ -373,6 +373,10 @@ class TestFillConfirmation(unittest.TestCase):
         bot._record_symbol_result = MagicMock()
         bot._record_direction_result = MagicMock()
         bot._apply_slippage = MagicMock(side_effect=lambda price, direction, is_entry, is_futures: price)
+        bot.symbol_unconfirmed_fill_strikes = {}
+        bot.symbol_unconfirmed_fill_paused_until = {}
+        bot.symbol_consecutive_losses = {}
+        bot.symbol_paused_until = {}
         for key, value in overrides.items():
             setattr(bot, key, value)
         return bot
@@ -416,6 +420,7 @@ class TestFillConfirmation(unittest.TestCase):
 
         self.assertEqual(result, 1.5)
         bot.trading_client.cancel_order_by_id.assert_not_called()
+
 
     def test_sell_qty_available_none_falls_back_to_position_qty(self):
         """Missing qty_available must fall back to total qty for conservative clamping."""
@@ -512,6 +517,119 @@ class TestFillConfirmation(unittest.TestCase):
         self.assertNotIn("AAVE/USD", bot.positions)
         bot._save_state.assert_called_once()
         bot.risk_manager.record_trade.assert_called_once()
+
+
+class TestUnconfirmedFillCooldown(unittest.TestCase):
+    """Tests for per-symbol unconfirmed-fill strike/cooldown entry blocking."""
+
+    def _make_bot(self):
+        from cryptotrades.core.trading_engine import TradingBot
+        bot = TradingBot.__new__(TradingBot)
+        bot.logger = MagicMock()
+        bot.trading_client = MagicMock()
+        bot.symbol_unconfirmed_fill_strikes = {}
+        bot.symbol_unconfirmed_fill_paused_until = {}
+        bot.symbol_consecutive_losses = {}
+        bot.symbol_paused_until = {}
+        return bot
+
+    def test_three_consecutive_unconfirmed_fills_block_symbol(self):
+        """3 consecutive unconfirmed Alpaca buy fills should pause new entries."""
+        import cryptotrades.core.trading_engine as te
+
+        bot = self._make_bot()
+        order = MagicMock(id="order-unfilled", filled_qty=None)
+        bot.trading_client.submit_order.return_value = order
+        bot.trading_client.get_order_by_id.return_value = order
+
+        with patch.object(te.cfg, "SYMBOL_UNCONFIRMED_FILL_STRIKES", 3), \
+             patch.object(te.cfg, "SYMBOL_UNCONFIRMED_FILL_COOLDOWN_HOURS", 4.0), \
+             patch("cryptotrades.core.trading_engine.time.sleep"):
+            for _ in range(3):
+                self.assertEqual(bot._alpaca_buy_spot("LDO/USD", 100.0), 0.0)
+
+        self.assertEqual(bot.symbol_unconfirmed_fill_strikes["LDO/USD"], 3)
+        self.assertIn("LDO/USD", bot.symbol_unconfirmed_fill_paused_until)
+        self.assertTrue(bot._is_symbol_unconfirmed_fill_paused("LDO/USD"))
+
+    def test_confirmed_fill_resets_unconfirmed_fill_strikes(self):
+        """A confirmed buy fill should reset and clear unconfirmed-fill tracking."""
+        bot = self._make_bot()
+        bot.symbol_unconfirmed_fill_strikes["HYPE/USD"] = 2
+        bot.symbol_unconfirmed_fill_paused_until["HYPE/USD"] = datetime.now() + timedelta(hours=1)
+
+        filled_order = MagicMock(id="order-filled", filled_qty="1.25")
+        bot.trading_client.submit_order.return_value = filled_order
+
+        with patch("cryptotrades.core.trading_engine.time.sleep"):
+            filled = bot._alpaca_buy_spot("HYPE/USD", 100.0)
+
+        self.assertEqual(filled, 1.25)
+        self.assertEqual(bot.symbol_unconfirmed_fill_strikes["HYPE/USD"], 0)
+        self.assertNotIn("HYPE/USD", bot.symbol_unconfirmed_fill_paused_until)
+
+    def test_unconfirmed_fill_cooldown_expiry_reenables_entries(self):
+        """Cooldown expiry should clear block state and allow entries again."""
+        bot = self._make_bot()
+        bot.symbol_unconfirmed_fill_strikes["LDO/USD"] = 3
+        bot.symbol_unconfirmed_fill_paused_until["LDO/USD"] = datetime.now() - timedelta(minutes=1)
+
+        self.assertFalse(bot._is_symbol_unconfirmed_fill_paused("LDO/USD"))
+        self.assertEqual(bot.symbol_unconfirmed_fill_strikes["LDO/USD"], 0)
+        self.assertNotIn("LDO/USD", bot.symbol_unconfirmed_fill_paused_until)
+
+    def test_unconfirmed_fill_state_survives_save_and_load_round_trip(self):
+        """Unconfirmed-fill strike/cooldown state should persist across restart."""
+        from cryptotrades.core.trading_engine import TradingBot
+
+        with tempfile.TemporaryDirectory() as tmp_root:
+            fake_file = os.path.join(tmp_root, "cryptotrades", "core", "trading_engine.py")
+            os.makedirs(os.path.dirname(fake_file), exist_ok=True)
+
+            paused_until = datetime.now().replace(microsecond=0) + timedelta(hours=2)
+
+            saver = TradingBot.__new__(TradingBot)
+            saver.positions = {}
+            saver.balance_spot = 1000.0
+            saver.balance_futures = 1000.0
+            saver.risk_manager = MagicMock(
+                peak_balance=2000.0,
+                daily_pnl=0.0,
+                consecutive_losses=0,
+                last_reset=datetime.now(),
+            )
+            saver.market_data = MagicMock(price_history={})
+            saver.logger = MagicMock()
+            saver.symbol_consecutive_losses = {"LDO/USD": 1}
+            saver.symbol_paused_until = {"LDO/USD": datetime.now().replace(microsecond=0) + timedelta(hours=1)}
+            saver.symbol_unconfirmed_fill_strikes = {"LDO/USD": 2}
+            saver.symbol_unconfirmed_fill_paused_until = {"LDO/USD": paused_until}
+
+            with patch("cryptotrades.core.trading_engine.__file__", fake_file):
+                saver._save_state()
+
+                loader = TradingBot.__new__(TradingBot)
+                loader.positions = {}
+                loader.balance_spot = 0.0
+                loader.balance_futures = 0.0
+                loader.risk_manager = MagicMock(
+                    update_balance=MagicMock(),
+                    peak_balance=0.0,
+                    current_balance=0.0,
+                    daily_pnl=0.0,
+                    consecutive_losses=0,
+                    last_reset=datetime.now(),
+                )
+                loader.market_data = MagicMock(price_history={})
+                loader.logger = MagicMock()
+                loader.symbol_consecutive_losses = {}
+                loader.symbol_paused_until = {}
+                loader.symbol_unconfirmed_fill_strikes = {}
+                loader.symbol_unconfirmed_fill_paused_until = {}
+                loader._load_state()
+
+        self.assertEqual(loader.symbol_unconfirmed_fill_strikes["LDO/USD"], 2)
+        self.assertEqual(loader.symbol_unconfirmed_fill_paused_until["LDO/USD"], paused_until)
 
 
 class TestSellSpotQtyAvailableTruthiness(unittest.TestCase):
