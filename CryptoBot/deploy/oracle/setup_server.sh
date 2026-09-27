@@ -67,6 +67,12 @@ for svc in "${retired_units[@]}"; do
 done
 systemctl daemon-reload
 
+# Keep deployment assets aligned with single-bot runtime
+rm -f "${BOT_HOME}/AI-Trading-Bot-Suite/CryptoBot/deploy/oracle/putseller.service" \
+      "${BOT_HOME}/AI-Trading-Bot-Suite/CryptoBot/deploy/oracle/spreadbot.service" \
+      "${BOT_HOME}/AI-Trading-Bot-Suite/CryptoBot/deploy/oracle/alpacabot.service" \
+      "${BOT_HOME}/AI-Trading-Bot-Suite/CryptoBot/deploy/oracle/callbuyer.service"
+
 # --- Create virtual environment & install deps ---
 echo "[6/8] Setting up Python virtual environment..."
 PYTHON_PATH=$PYTHON
