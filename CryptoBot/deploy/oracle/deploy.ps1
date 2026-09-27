@@ -99,12 +99,12 @@ if ($FirstDeploy) {
 #  5. Enforce retired service cleanup + restart active services
 # ---------------------------------------------------------------------------
 Log "Stopping/disabling retired services (if present)..."
-Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'for s in putseller spreadbot alpacabot callbuyer; do sudo systemctl stop \"`$s\" 2>/dev/null || true; sudo systemctl disable \"`$s\" 2>/dev/null || true; done'"
+Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'sudo systemctl stop putseller 2>/dev/null || true; sudo systemctl disable putseller 2>/dev/null || true; sudo systemctl stop spreadbot 2>/dev/null || true; sudo systemctl disable spreadbot 2>/dev/null || true; sudo systemctl stop alpacabot 2>/dev/null || true; sudo systemctl disable alpacabot 2>/dev/null || true; sudo systemctl stop callbuyer 2>/dev/null || true; sudo systemctl disable callbuyer 2>/dev/null || true'"
 
 Log "Restarting active services..."
 Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'sudo systemctl restart cryptobot 2>&1; sudo systemctl start bot-watchdog.timer 2>&1'"
 
 Log "Checking status..."
-Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'printf ""%-12s %s\n"" ""cryptobot"" ""`$(systemctl is-active cryptobot)""; printf ""%-12s %s\n"" ""watchdog"" ""`$(systemctl is-active bot-watchdog.timer)""; for s in putseller spreadbot alpacabot callbuyer; do printf ""%-12s %s\n"" ""`$s"" ""`$(systemctl is-enabled "`$s" 2>/dev/null || echo not-installed)""; done'"
+Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'printf ""%-12s %s\n"" ""cryptobot"" ""`$(systemctl is-active cryptobot)""; printf ""%-12s %s\n"" ""watchdog"" ""`$(systemctl is-active bot-watchdog.timer)""; printf ""%-12s %s\n"" ""putseller"" ""`$(systemctl is-enabled putseller 2>/dev/null || echo not-installed)""; printf ""%-12s %s\n"" ""spreadbot"" ""`$(systemctl is-enabled spreadbot 2>/dev/null || echo not-installed)""; printf ""%-12s %s\n"" ""alpacabot"" ""`$(systemctl is-enabled alpacabot 2>/dev/null || echo not-installed)""; printf ""%-12s %s\n"" ""callbuyer"" ""`$(systemctl is-enabled callbuyer 2>/dev/null || echo not-installed)""'"
 
 Log "Deploy complete!"
