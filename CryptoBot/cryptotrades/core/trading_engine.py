@@ -45,6 +45,8 @@ try:
 except Exception:
     ALPACA_TRADING_SDK_AVAILABLE = False
 ALPACA_DATA_URL = "https://data.alpaca.markets/v1beta3/crypto/us"
+_ALPACA_QTY_UNSET = object()
+_ALPACA_ZERO_QTY_RECONCILE_CONFIRMATIONS = 2
 
 # Real order execution for Kraken Futures (in-house signed REST client)
 from core.kraken_futures_client import KrakenFuturesClient
@@ -397,6 +399,7 @@ class Position:
     ml_confidence: float = 0.0
     entry_reason: str = ""
     broker_qty: float = 0.0  # Real Alpaca fill qty, if a live spot order was placed
+    broker_zero_qty_confirmations: int = 0  # Consecutive broker-confirmed zero-available close attempts
     kraken_order_id: str = ""  # Real Kraken Futures order id, if a live futures order was placed
     close_retry_count: int = 0  # Consecutive failed/zero-fill close attempts, persisted across restarts
     close_retry_first_at: Optional[datetime] = None  # When the current retry streak began
@@ -2442,10 +2445,9 @@ class TradingBot:
         # oversell attempts through, which partially filled and left fee-dust
         # behind — see fix/cryptobot-dust-reconciliation).
         try:
-            position = self.trading_client.get_open_position(symbol.replace("/", ""))
-            raw_available = getattr(position, "qty_available", None)
-            available = float(raw_available) if raw_available is not None else float(position.qty)
-            qty = min(qty, max(available, 0.0))
+            available, _explicit_available = self._alpaca_spot_available_qty(symbol)
+            if available is not None:
+                qty = min(qty, max(available, 0.0))
         except Exception:
             pass
         if qty <= 0:
@@ -2474,6 +2476,17 @@ class TradingBot:
         except Exception as e:
             self.logger.error(f"ALPACA ORDER FAILED: SELL {symbol} qty={qty}: {e}")
             return 0.0
+
+    def _alpaca_spot_available_qty(self, symbol: str) -> Tuple[Optional[float], bool]:
+        """Return (available_qty, used_explicit_qty_available) for a live Alpaca spot position."""
+        if not self.trading_client:
+            return None, False
+        position = self.trading_client.get_open_position(symbol.replace("/", ""))
+        raw_available = getattr(position, "qty_available", _ALPACA_QTY_UNSET)
+        if raw_available is _ALPACA_QTY_UNSET or raw_available is None:
+            raw_qty = getattr(position, "qty", None)
+            return (float(raw_qty), False) if raw_qty is not None else (None, False)
+        return float(raw_available), True
 
     def _should_reconcile_dust(self, position: "Position") -> bool:
         """Conservative gate for dropping a stuck local position with no confirmed sell.
@@ -2507,9 +2520,12 @@ class TradingBot:
             return False
         try:
             position = self.trading_client.get_open_position(symbol.replace("/", ""))
-            raw_available = getattr(position, "qty_available", None)
-            available = float(raw_available) if raw_available is not None else float(position.qty)
-            return available <= 0 and float(position.qty) <= 0
+            raw_qty = getattr(position, "qty", None)
+            qty = float(raw_qty) if raw_qty is not None else None
+            available, explicit_available = self._alpaca_spot_available_qty(symbol)
+            if explicit_available and available is not None:
+                return available <= 0 or (qty is not None and qty <= 0)
+            return qty is not None and qty <= 0
         except APIError as e:
             return e.status_code == 404
         except Exception:
@@ -3390,41 +3406,77 @@ class TradingBot:
         # CONFIRMED sold qty before deleting any state — a silently-ignored
         # failed/partial sell is exactly what created the AAVE/PEPE/UNI orphans.
         if position.broker_qty > 0:
-            sold_qty = self._alpaca_sell_spot(symbol, position.broker_qty)
+            tracked_broker_qty = position.broker_qty
+            sold_qty = self._alpaca_sell_spot(symbol, tracked_broker_qty)
             if sold_qty <= 0:
-                position.close_retry_count += 1
-                if position.close_retry_first_at is None:
-                    position.close_retry_first_at = datetime.now()
-                self._save_state()
+                broker_zero_confirmed = False
+                try:
+                    available, explicit_available = self._alpaca_spot_available_qty(symbol)
+                    broker_zero_confirmed = bool(
+                        explicit_available
+                        and available is not None
+                        and available <= 0
+                    )
+                except Exception:
+                    broker_zero_confirmed = False
 
-                if self._should_reconcile_dust(position):
-                    if self._confirm_zero_broker_qty(symbol):
-                        retry_span = datetime.now() - position.close_retry_first_at
+                if broker_zero_confirmed:
+                    position.broker_zero_qty_confirmations += 1
+                    if position.broker_zero_qty_confirmations < _ALPACA_ZERO_QTY_RECONCILE_CONFIRMATIONS:
                         self.logger.warning(
-                            f"CLOSE {symbol}: dust reconciliation — broker independently "
-                            f"confirms zero sellable quantity after {position.close_retry_count} "
-                            f"failed attempts over {retry_span} (residual broker_qty="
-                            f"{position.broker_qty:.8f}); dropping stale LOCAL record only, "
-                            f"no broker action taken"
+                            f"CLOSE {symbol}: Alpaca broker confirmed qty_available=0.0 "
+                            f"for tracked broker_qty={tracked_broker_qty:.8f} "
+                            f"(confirmation {position.broker_zero_qty_confirmations}/"
+                            f"{_ALPACA_ZERO_QTY_RECONCILE_CONFIRMATIONS}) — "
+                            f"KEEPING position tracked pending explicit reconciliation"
                         )
-                        del self.positions[position_key]
                         self._save_state()
+                        return
+                    self.logger.warning(
+                        f"CLOSE {symbol}: Alpaca broker repeatedly confirmed qty_available=0.0 "
+                        f"for tracked broker_qty={tracked_broker_qty:.8f} — "
+                        f"reconciling local broker exposure to zero before closing position"
+                    )
+                    position.broker_qty = 0.0
+                    position.broker_zero_qty_confirmations = 0
+                    position.close_retry_count = 0
+                    position.close_retry_first_at = None
+                else:
+                    position.broker_zero_qty_confirmations = 0
+                    position.close_retry_count += 1
+                    if position.close_retry_first_at is None:
+                        position.close_retry_first_at = datetime.now()
+                    self._save_state()
+
+                    if self._should_reconcile_dust(position):
+                        if self._confirm_zero_broker_qty(symbol):
+                            retry_span = datetime.now() - position.close_retry_first_at
+                            self.logger.warning(
+                                f"CLOSE {symbol}: dust reconciliation — broker independently "
+                                f"confirms zero sellable quantity after {position.close_retry_count} "
+                                f"failed attempts over {retry_span} (residual broker_qty="
+                                f"{position.broker_qty:.8f}); dropping stale LOCAL record only, "
+                                f"no broker action taken"
+                            )
+                            del self.positions[position_key]
+                            self._save_state()
+                        else:
+                            self.logger.warning(
+                                f"CLOSE {symbol}: dust reconciliation deferred — broker still "
+                                f"reports non-zero exposure, KEEPING position tracked for retry "
+                                f"(attempt {position.close_retry_count})"
+                            )
                     else:
                         self.logger.warning(
-                            f"CLOSE {symbol}: dust reconciliation deferred — broker still "
-                            f"reports non-zero exposure, KEEPING position tracked for retry "
-                            f"(attempt {position.close_retry_count})"
+                            f"CLOSE {symbol}: Alpaca sell did NOT confirm any fill "
+                            f"(attempt {position.close_retry_count}) — KEEPING position tracked "
+                            f"at broker_qty={position.broker_qty:.8f} for retry"
                         )
-                else:
-                    self.logger.warning(
-                        f"CLOSE {symbol}: Alpaca sell did NOT confirm any fill "
-                        f"(attempt {position.close_retry_count}) — KEEPING position tracked "
-                        f"at broker_qty={position.broker_qty:.8f} for retry"
-                    )
-                return
-            # A confirmed sell resets the retry streak for this position.
+                    return
+
             position.close_retry_count = 0
             position.close_retry_first_at = None
+            position.broker_zero_qty_confirmations = 0
             if sold_qty < position.broker_qty * 0.999:
                 remaining = position.broker_qty - sold_qty
                 self.logger.warning(
@@ -3433,6 +3485,7 @@ class TradingBot:
                     f"remaining qty={remaining:.8f} for retry"
                 )
                 position.broker_qty = remaining
+                position.broker_zero_qty_confirmations = 0
                 self._save_state()
                 return
         elif is_futures and position.kraken_order_id:
