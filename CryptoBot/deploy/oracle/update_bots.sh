@@ -28,8 +28,9 @@ done
 
 echo ""
 echo "=== Restarting active services ==="
+sudo systemctl daemon-reload
 sudo systemctl restart cryptobot
-sudo systemctl start bot-watchdog.timer
+sudo systemctl restart bot-watchdog.timer
 
 echo ""
 echo "=== Status ==="
