@@ -73,6 +73,15 @@ as historically-eliminated DROP symbols (unprofitable, excluded from the
 live scanner's real universe) -- kept here anyway since the task explicitly
 requires this universe for controlled comparison.
 
+IMPORTANT (fixed 2026-09-27): resample_intraday() now does real calendar-
+time resampling (pandas .resample() on a DatetimeIndex) instead of an
+earlier positional "every Nth row" version. The positional version could
+drift out of wall-clock alignment whenever the underlying 1-min data had
+gaps or a different starting offset between two separate fetches of
+nominally-similar periods -- confirmed via a stark result discrepancy
+between two overlapping-but-not-identical windows. All results in this
+file's history from before this fix should be treated as unreliable.
+
 Usage (from AlpacaBot/, with its own venv):
   .venv/bin/python3 tools/backtest_tuned.py [--symbols SPY,QQQ,...] [--days 200] [--force-refresh]
   .venv/bin/python3 tools/backtest_tuned.py --start-date 2025-08-04 --end-date 2026-03-02 --cache-label 1min_oos
@@ -555,14 +564,26 @@ class MLHybridSignal:
 
 
 # =============================================================
-#  RESAMPLING (generalizes backtest_mtf.py's resample_to_10min pattern)
+#  RESAMPLING -- real calendar-time resampling (pandas .resample() on a
+#  DatetimeIndex). FIXED 2026-09-27: an earlier version took every Nth
+#  ROW (positional), which could drift out of true wall-clock alignment
+#  whenever the underlying 1-min data had gaps or a different starting
+#  offset between two separate fetches -- confirmed via a stark result
+#  discrepancy between two overlapping-but-not-identical test windows.
 # =============================================================
 
-def resample_intraday(df, factor):
-    """Take every `factor`-th 1-min bar's close+timestamp."""
-    sub = df.iloc[factor - 1::factor]
-    closes = sub["close"].values.astype(float)
-    ts = sub["timestamp"].values.astype("datetime64[ns]")
+def resample_intraday(df, freq):
+    """Resample 1-min bars to `freq` (pandas offset alias, e.g. '2min',
+    '10min', '1h') using the LAST close within each real calendar interval.
+    Bars are labeled/closed on the LEFT edge (bar timestamp = interval
+    START), matching Alpaca's own bar convention and this module's
+    align_index_before assumption that a bar's timestamp marks its start.
+    Intervals with no underlying 1-min data are dropped (not silently
+    filled/misaligned)."""
+    d = df.set_index("timestamp").sort_index()
+    resampled = d["close"].resample(freq, label="left", closed="left").last().dropna()
+    closes = resampled.values.astype(float)
+    ts = resampled.index.values.astype("datetime64[ns]")
     return closes, ts
 
 
@@ -944,10 +965,10 @@ def main():
     data_2min, data_10min, data_15min, data_1hour, data_daily = {}, {}, {}, {}, {}
     for sym in symbols:
         df = data_1min[sym]
-        c, t = resample_intraday(df, 2); data_2min[sym] = {"close": c, "ts": t}
-        c, t = resample_intraday(df, 10); data_10min[sym] = {"close": c, "ts": t}
-        c, t = resample_intraday(df, 15); data_15min[sym] = {"close": c, "ts": t}
-        c, t = resample_intraday(df, 60); data_1hour[sym] = {"close": c, "ts": t}
+        c, t = resample_intraday(df, "2min"); data_2min[sym] = {"close": c, "ts": t}
+        c, t = resample_intraday(df, "10min"); data_10min[sym] = {"close": c, "ts": t}
+        c, t = resample_intraday(df, "15min"); data_15min[sym] = {"close": c, "ts": t}
+        c, t = resample_intraday(df, "1h"); data_1hour[sym] = {"close": c, "ts": t}
         c, t = resample_daily(df); data_daily[sym] = {"close": c, "ts": t}
         print(f"  {sym}: {len(data_2min[sym]['close']):,} 2m | {len(data_10min[sym]['close']):,} 10m | "
               f"{len(data_15min[sym]['close']):,} 15m | {len(data_1hour[sym]['close']):,} 1h | "
@@ -1014,7 +1035,7 @@ def main():
             pdf = fetch_1min_window_cached(sym, pre_start, pre_end,
                                             label=args.pretrain_cache_label,
                                             force=args.force_refresh)
-            c, t = resample_intraday(pdf, 60)
+            c, t = resample_intraday(pdf, "1h")
             pretrain_1hour[sym] = {"close": c, "ts": t}
             print(f"  {sym}: {len(c):,} pretrain 1-hour bars")
 
