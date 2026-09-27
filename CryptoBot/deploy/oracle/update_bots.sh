@@ -34,8 +34,8 @@ sudo systemctl restart bot-watchdog.timer
 
 echo ""
 echo "=== Status ==="
-printf "%-12s %s\n" "cryptobot" "$(systemctl is-active cryptobot 2>/dev/null || echo inactive)"
-printf "%-12s %s\n" "watchdog" "$(systemctl is-active bot-watchdog.timer 2>/dev/null || echo inactive)"
+printf "%-12s %s\n" "cryptobot" "$(systemctl show -p ActiveState --value cryptobot 2>/dev/null || echo not-installed)"
+printf "%-12s %s\n" "watchdog" "$(systemctl show -p ActiveState --value bot-watchdog.timer 2>/dev/null || echo not-installed)"
 for s in putseller spreadbot alpacabot callbuyer; do
     printf "%-12s %s\n" "$s" "$(systemctl is-enabled "$s" 2>/dev/null || echo not-installed)"
 done
