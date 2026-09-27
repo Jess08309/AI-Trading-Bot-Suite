@@ -112,7 +112,7 @@ log "Stopping/disabling retired services (if present)..."
 $SSH "${BOT_USER}@${SERVER_IP}" 'for unit in putseller.service putseller.timer spreadbot.service spreadbot.timer alpacabot.service alpacabot.timer callbuyer.service callbuyer.timer; do sudo systemctl stop "$unit" 2>/dev/null || true; sudo systemctl disable "$unit" 2>/dev/null || true; sudo rm -f /etc/systemd/system/"$unit" /lib/systemd/system/"$unit" /usr/lib/systemd/system/"$unit"; for link_dir in /etc/systemd/system/*.wants /etc/systemd/system/*.requires; do [ -d "$link_dir" ] || continue; sudo rm -f "$link_dir/$unit"; done; sudo systemctl reset-failed "$unit" 2>/dev/null || true; done; sudo systemctl daemon-reload'
 
 log "Restarting active services..."
-$SSH "${BOT_USER}@${SERVER_IP}" 'sudo systemctl daemon-reload; sudo systemctl restart cryptobot; sudo systemctl restart bot-watchdog.timer; sudo systemctl start bot-watchdog.service'
+$SSH "${BOT_USER}@${SERVER_IP}" 'sudo systemctl daemon-reload; sudo systemctl restart cryptobot; sudo systemctl restart bot-watchdog.timer'
 
 log "Checking status..."
 $SSH "${BOT_USER}@${SERVER_IP}" 'printf "%-12s %s\n" "cryptobot" "$(systemctl is-active cryptobot 2>/dev/null || echo inactive)"; printf "%-12s %s\n" "watchdog" "$(systemctl is-active bot-watchdog.timer 2>/dev/null || echo inactive)"; for s in putseller spreadbot alpacabot callbuyer; do printf "%-12s %s\n" "$s" "$(systemctl is-enabled "$s" 2>/dev/null || echo not-installed)"; done'
