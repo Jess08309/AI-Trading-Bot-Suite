@@ -52,26 +52,50 @@ Config C (SWING-TUNED): 1-hour bars (resampled from 1-min), trimmed
   elapse; real risk stops -- stop-loss/take-profit/trailing -- remain
   always-on regardless of MIN_HOLD, since disabling risk controls to force
   a hold period would not be a safe design).
+Config D (ML HYBRID, optional -- only runs when --configs includes "D"):
+  Same timeframe/trend-filter/DTE/holds as Config C, but the bull/bear
+  point-scoring is replaced with a GradientBoostingClassifier (mirrors
+  CryptoBot's cryptotrades/utils/market_predictor.py::MarketPredictor
+  pattern: GradientBoostingClassifier, TimeSeriesSplit CV for a reported
+  diagnostic accuracy, predict_proba-based confidence) trained on the same
+  4 indicators to predict 3-bars-ahead direction. The model is trained
+  ONCE on a --pretrain-start/--pretrain-end window strictly BEFORE all
+  walk-forward test windows, then frozen and reused unchanged across every
+  test window -- same no-look-ahead methodology already established in this
+  repo for CryptoBot's pipeline v4 frozen gate model. MIN confidence 0.55.
 
-All 3 configs share: universe, date range, sizing formula, MAX_POSITIONS,
-and the Black-Scholes pricing/IV-estimation -- only bar timeframe,
-indicator set, trend filter, and DTE differ (the intentional experiment
-variables). Universe is SPY/QQQ/AAPL/MSFT/NVDA per the task spec; note
-core/scanner.py's SCANNER_UNIVERSE comment block documents SPY/QQQ/MSFT as
-historically-eliminated DROP symbols (unprofitable, excluded from the live
-scanner's real universe) -- kept here anyway since the task explicitly
+All 3 (or 4, with D) configs share: universe, date range, sizing formula,
+MAX_POSITIONS, and the Black-Scholes pricing/IV-estimation -- only bar
+timeframe, indicator set, trend filter, and DTE differ (the intentional
+experiment variables). Universe is SPY/QQQ/AAPL/MSFT/NVDA per the task spec;
+note core/scanner.py's SCANNER_UNIVERSE comment block documents SPY/QQQ/MSFT
+as historically-eliminated DROP symbols (unprofitable, excluded from the
+live scanner's real universe) -- kept here anyway since the task explicitly
 requires this universe for controlled comparison.
 
 Usage (from AlpacaBot/, with its own venv):
   .venv/bin/python3 tools/backtest_tuned.py [--symbols SPY,QQQ,...] [--days 200] [--force-refresh]
+  .venv/bin/python3 tools/backtest_tuned.py --start-date 2025-08-04 --end-date 2026-03-02 --cache-label 1min_oos
+    (explicit [start,end) window -- e.g. for out-of-sample/walk-forward
+    validation on a non-overlapping historical period; cached separately
+    via --cache-label so it never collides with the default trailing-days
+    cache or with other windows)
+  .venv/bin/python3 tools/backtest_tuned.py --start-date 2024-03-01 --end-date 2024-09-01 --cache-label wf_windowA \\
+      --configs A,B,C,D --pretrain-start 2022-09-01 --pretrain-end 2024-03-01 --pretrain-cache-label 1min_pretrain
+    (adds Config D -- trains the frozen ML hybrid model on the pretrain
+    window once, then backtests it on the --start-date/--end-date window)
 """
 import sys, os, math, argparse, warnings
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
 from collections import defaultdict
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.model_selection import TimeSeriesSplit
 
 from core.indicators import (
     compute_all_indicators,
@@ -79,7 +103,7 @@ from core.indicators import (
     bollinger_bands as bb_series, volatility_ratio as volr_series,
 )
 from core.config import Config, SYMBOL_DTE_MAP, DEFAULT_DTE
-from tools.bar_cache import fetch_1min_cached
+from tools.bar_cache import fetch_1min_cached, fetch_1min_window_cached
 
 try:
     from utils.ml_model import OptionsMLModel
@@ -112,6 +136,7 @@ MODE_LABELS = {
     "A_baseline": "A: BASELINE (10-min, 14-ind, +ML gate)",
     "B_scalp": "B: SCALP-TUNED (2-min, 4-ind, 15m trend filter)",
     "C_swing": "C: SWING-TUNED (1-hour, 4-ind, daily trend filter)",
+    "D_ml_hybrid": "D: ML HYBRID (1-hour, GBM classifier, daily trend filter)",
 }
 
 
@@ -347,7 +372,7 @@ def generate_signal_trimmed(chunk, min_signal_score=TRIMMED_MIN_SIGNAL_SCORE):
 
 def trend_bias_trimmed(chunk):
     """Lightweight trend-agreement filter for Config B (15-min bars) and
-    Config C (daily bars). Returns 'call' (bullish), 'put' (bearish), or
+    Config C/D (daily bars). Returns 'call' (bullish), 'put' (bearish), or
     None (flat -- no directional constraint applied)."""
     if len(chunk) < 25:
         return None
@@ -418,6 +443,118 @@ class MLGate:
 
 
 # =============================================================
+#  CONFIG D: ML HYBRID -- GradientBoostingClassifier on the same 4
+#  indicators, mirroring CryptoBot's market_predictor.py pattern (GBM +
+#  TimeSeriesSplit CV for a diagnostic accuracy). Frozen model trained
+#  ONCE on a pretrain window strictly BEFORE any walk-forward test window
+#  -- no look-ahead, same methodology as this repo's CryptoBot pipeline v4
+#  frozen gate model.
+# =============================================================
+
+ML_HYBRID_MIN_CONFIDENCE = 0.55
+ML_HYBRID_HORIZON = 3   # predict 3 bars ahead (3 hours, on Config D's 1-hour bars)
+
+
+def build_indicator_feature_matrix(closes):
+    """Full-series indicator computation (not just the latest value) for
+    rsi/macd_hist/bb_position/volatility_ratio -- used for classifier
+    training, where every historical bar needs its own feature row."""
+    rsi_vals = rsi_series(closes)
+    _, _, macd_hist = macd_series(closes)
+    _, _, _, bb_pct = bb_series(closes)
+    vol_r = volr_series(closes)
+    X = np.column_stack([rsi_vals, macd_hist, bb_pct, vol_r])
+    return np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def build_training_labels(closes, horizon=ML_HYBRID_HORIZON):
+    """1 if close[t+horizon] > close[t] else 0. Last `horizon` bars are
+    unlabeled (no future price yet) -- marked -1 and filtered out by callers."""
+    y = np.full(len(closes), -1, dtype=int)
+    if len(closes) > horizon:
+        y[:-horizon] = (closes[horizon:] > closes[:-horizon]).astype(int)
+    return y
+
+
+def train_ml_hybrid_model(pretrain_data, warmup=50):
+    """Train the frozen Config D model across all symbols' pretrain 1-hour
+    closes. pretrain_data: {symbol: {"close": array, "ts": array}}.
+
+    TimeSeriesSplit CV score is reported as a diagnostic only; the model
+    actually used for backtesting is refit on the FULL pretrain set (still
+    entirely before any of the walk-forward test windows -- refitting on
+    100% of an already-frozen, already-past dataset introduces no leakage
+    into the test windows that follow it).
+    """
+    X_parts, y_parts = [], []
+    for sym, d in pretrain_data.items():
+        closes = d["close"]
+        if len(closes) < warmup + ML_HYBRID_HORIZON + 10:
+            continue
+        X = build_indicator_feature_matrix(closes)
+        y = build_training_labels(closes)
+        mask = y >= 0
+        mask[:warmup] = False
+        X_parts.append(X[mask])
+        y_parts.append(y[mask])
+
+    if not X_parts:
+        raise RuntimeError("Not enough pretrain data to train the ML hybrid model")
+
+    X_all = np.concatenate(X_parts, axis=0)
+    y_all = np.concatenate(y_parts, axis=0)
+    print(f"  ML hybrid: training on {len(X_all):,} samples "
+          f"({np.mean(y_all):.1%} UP) from the pretrain window")
+
+    n_splits = min(5, max(2, len(X_all) // 500))
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    cv_scores = []
+    for train_idx, test_idx in tscv.split(X_all):
+        m = GradientBoostingClassifier(
+            n_estimators=200, max_depth=5, learning_rate=0.05,
+            subsample=0.8, min_samples_split=20, min_samples_leaf=10,
+            random_state=42,
+        )
+        m.fit(X_all[train_idx], y_all[train_idx])
+        cv_scores.append(m.score(X_all[test_idx], y_all[test_idx]))
+    print(f"  ML hybrid: TimeSeriesSplit CV accuracy = {np.mean(cv_scores):.1%} "
+          f"(avg {n_splits} folds, diagnostic only)")
+
+    final_model = GradientBoostingClassifier(
+        n_estimators=200, max_depth=5, learning_rate=0.05,
+        subsample=0.8, min_samples_split=20, min_samples_leaf=10,
+        random_state=42,
+    )
+    final_model.fit(X_all, y_all)
+    return final_model
+
+
+class MLHybridSignal:
+    """Config D's signal generator: same 4 indicators as Config C, but
+    direction/confidence come from the frozen GradientBoostingClassifier
+    instead of the bull/bear point-scoring system."""
+
+    def __init__(self, model):
+        self.model = model
+
+    def __call__(self, chunk):
+        if len(chunk) < 30:
+            return None, 0, {}
+        ind = compute_trimmed_indicators(chunk)
+        feats = np.array([[ind["rsi"], ind["macd_hist"], ind["bb_position"],
+                            ind["volatility_ratio"]]])
+        feats = np.nan_to_num(feats, nan=0.0, posinf=0.0, neginf=0.0)
+        proba = self.model.predict_proba(feats)[0]
+        up_prob = float(proba[1])
+        confidence = max(up_prob, 1.0 - up_prob)
+        if confidence < ML_HYBRID_MIN_CONFIDENCE:
+            return None, 0, ind
+        direction = "call" if up_prob > 0.5 else "put"
+        score = int(round(confidence * 10))  # cosmetic -- reporting/example-trades only
+        return direction, score, ind
+
+
+# =============================================================
 #  RESAMPLING (generalizes backtest_mtf.py's resample_to_10min pattern)
 # =============================================================
 
@@ -452,7 +589,7 @@ def align_index_before(primary_ts, trend_ts, i, buffer_minutes):
 
 
 # =============================================================
-#  GENERIC EVENT-LOOP BACKTESTER (shared by Configs A/B/C)
+#  GENERIC EVENT-LOOP BACKTESTER (shared by Configs A/B/C/D)
 #  Same architecture as backtest_mtf.py::run_single_backtest (mark-to-
 #  market -> exits in priority order -> circuit breakers -> signal
 #  generation -> price + size + open), generalized over bar timeframe /
@@ -749,23 +886,56 @@ def parse_args():
     p.add_argument("--symbols", type=str, default=",".join(SYMBOLS))
     p.add_argument("--days", type=int, default=HISTORY_DAYS)
     p.add_argument("--force-refresh", action="store_true")
+    p.add_argument("--start-date", type=str, default=None,
+                    help="Explicit window start YYYY-MM-DD (e.g. out-of-sample/"
+                         "walk-forward validation on a non-overlapping period). "
+                         "Requires --end-date.")
+    p.add_argument("--end-date", type=str, default=None,
+                    help="Explicit window end YYYY-MM-DD, exclusive. Requires --start-date.")
+    p.add_argument("--cache-label", type=str, default="1min_oos",
+                    help="Cache file label for an explicit --start-date/--end-date window "
+                         "(kept separate from the default trailing-days cache so different "
+                         "historical periods never collide/overwrite each other).")
+    p.add_argument("--configs", type=str, default="A,B,C",
+                    help="Comma list of configs to run, e.g. 'A,B,C,D'. D requires "
+                         "--pretrain-start/--pretrain-end.")
+    p.add_argument("--pretrain-start", type=str, default=None,
+                    help="Config D only: ML hybrid pretrain window start YYYY-MM-DD. "
+                         "Must end before --start-date to avoid look-ahead leakage.")
+    p.add_argument("--pretrain-end", type=str, default=None,
+                    help="Config D only: ML hybrid pretrain window end YYYY-MM-DD, exclusive.")
+    p.add_argument("--pretrain-cache-label", type=str, default="1min_pretrain",
+                    help="Cache label for the Config D pretrain window.")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
     symbols = [s.strip().upper() for s in args.symbols.split(",")]
+    use_window = bool(args.start_date and args.end_date)
+    configs_to_run = {c.strip().upper() for c in args.configs.split(",")}
 
     print("=" * 78)
     print("  AlpacaBot Strategy-Improvement Comparative Backtest")
-    print("  Config A (baseline+ML) vs B (scalp-tuned) vs C (swing-tuned)")
-    print(f"  Universe: {', '.join(symbols)} | Balance: ${INITIAL_BALANCE:,.0f} | Days: {args.days}")
+    print(f"  Configs requested: {sorted(configs_to_run)}")
+    if use_window:
+        print(f"  Universe: {', '.join(symbols)} | Balance: ${INITIAL_BALANCE:,.0f} | "
+              f"Window: {args.start_date} to {args.end_date} (label={args.cache_label})")
+    else:
+        print(f"  Universe: {', '.join(symbols)} | Balance: ${INITIAL_BALANCE:,.0f} | Days: {args.days}")
     print("=" * 78)
 
-    print(f"\n[1/3] Fetching 1-min bars (~{args.days}d, cached, IEX feed)...")
+    window_desc = f"window {args.start_date} to {args.end_date}" if use_window else f"~{args.days}d trailing"
+    print(f"\n[1/3] Fetching 1-min bars ({window_desc}, cached, IEX feed)...")
     data_1min = {}
     for sym in symbols:
-        df = fetch_1min_cached(sym, days=args.days, force=args.force_refresh)
+        if use_window:
+            start_dt = datetime.strptime(args.start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(args.end_date, "%Y-%m-%d")
+            df = fetch_1min_window_cached(sym, start_dt, end_dt, label=args.cache_label,
+                                           force=args.force_refresh)
+        else:
+            df = fetch_1min_cached(sym, days=args.days, force=args.force_refresh)
         data_1min[sym] = df
         days_covered = df["timestamp"].astype(str).str[:10].nunique()
         print(f"  {sym}: {len(df):,} 1-min bars ({days_covered} trading days)")
@@ -783,46 +953,86 @@ def main():
               f"{len(data_15min[sym]['close']):,} 15m | {len(data_1hour[sym]['close']):,} 1h | "
               f"{len(data_daily[sym]['close']):,} daily")
 
-    print("\n[3/3] Loading ML model for Config A gate...")
-    ml_gate = MLGate()
-
     results = []
 
-    print("\n" + "=" * 78)
-    print("  Running Config A: BASELINE (10-min, 14 indicators, +ML gate)")
-    print("=" * 78)
-    results.append(run_config(
-        "A_baseline", data_10min, bars_per_day=39, lookback=cfg.LOOKBACK_BARS,
-        signal_fn=lambda chunk: generate_signal_full(chunk, cfg.MIN_SIGNAL_SCORE),
-        dte_fn=get_dte_for_symbol_A, max_hold_days_fn=cfg.get_max_hold_days,
-        min_hold_days=0, trend=None, ml_gate=ml_gate,
-        cooldown_bars=cfg.COOLDOWN_BARS, signal_check_interval=cfg.SIGNAL_CHECK_BARS,
-        symbols=symbols,
-    ))
+    if "A" in configs_to_run:
+        print("\n[3/3] Loading ML model for Config A gate...")
+        ml_gate = MLGate()
+        print("\n" + "=" * 78)
+        print("  Running Config A: BASELINE (10-min, 14 indicators, +ML gate)")
+        print("=" * 78)
+        results.append(run_config(
+            "A_baseline", data_10min, bars_per_day=39, lookback=cfg.LOOKBACK_BARS,
+            signal_fn=lambda chunk: generate_signal_full(chunk, cfg.MIN_SIGNAL_SCORE),
+            dte_fn=get_dte_for_symbol_A, max_hold_days_fn=cfg.get_max_hold_days,
+            min_hold_days=0, trend=None, ml_gate=ml_gate,
+            cooldown_bars=cfg.COOLDOWN_BARS, signal_check_interval=cfg.SIGNAL_CHECK_BARS,
+            symbols=symbols,
+        ))
 
-    print("\n" + "=" * 78)
-    print("  Running Config B: SCALP-TUNED (2-min, 4 indicators, 15m trend filter)")
-    print("=" * 78)
-    results.append(run_config(
-        "B_scalp", data_2min, bars_per_day=195, lookback=50,
-        signal_fn=generate_signal_trimmed, dte_fn=lambda sym: 1,
-        max_hold_days_fn=lambda sym: 1, min_hold_days=0,
-        trend=data_15min, trend_buffer_minutes=15, ml_gate=None,
-        cooldown_bars=12, signal_check_interval=3,
-        symbols=symbols,
-    ))
+    if "B" in configs_to_run:
+        print("\n" + "=" * 78)
+        print("  Running Config B: SCALP-TUNED (2-min, 4 indicators, 15m trend filter)")
+        print("=" * 78)
+        results.append(run_config(
+            "B_scalp", data_2min, bars_per_day=195, lookback=50,
+            signal_fn=generate_signal_trimmed, dte_fn=lambda sym: 1,
+            max_hold_days_fn=lambda sym: 1, min_hold_days=0,
+            trend=data_15min, trend_buffer_minutes=15, ml_gate=None,
+            cooldown_bars=12, signal_check_interval=3,
+            symbols=symbols,
+        ))
 
-    print("\n" + "=" * 78)
-    print("  Running Config C: SWING-TUNED (1-hour, 4 indicators, daily trend filter)")
-    print("=" * 78)
-    results.append(run_config(
-        "C_swing", data_1hour, bars_per_day=6.5, lookback=50,
-        signal_fn=generate_signal_trimmed, dte_fn=lambda sym: 10,
-        max_hold_days_fn=lambda sym: 5, min_hold_days=2,
-        trend=data_daily, trend_buffer_minutes=1440, ml_gate=None,
-        cooldown_bars=4, signal_check_interval=1,
-        symbols=symbols,
-    ))
+    if "C" in configs_to_run:
+        print("\n" + "=" * 78)
+        print("  Running Config C: SWING-TUNED (1-hour, 4 indicators, daily trend filter)")
+        print("=" * 78)
+        results.append(run_config(
+            "C_swing", data_1hour, bars_per_day=6.5, lookback=50,
+            signal_fn=generate_signal_trimmed, dte_fn=lambda sym: 10,
+            max_hold_days_fn=lambda sym: 5, min_hold_days=2,
+            trend=data_daily, trend_buffer_minutes=1440, ml_gate=None,
+            cooldown_bars=4, signal_check_interval=1,
+            symbols=symbols,
+        ))
+
+    if "D" in configs_to_run:
+        if not (args.pretrain_start and args.pretrain_end):
+            raise SystemExit("Config D requires --pretrain-start and --pretrain-end")
+        pre_start = datetime.strptime(args.pretrain_start, "%Y-%m-%d")
+        pre_end = datetime.strptime(args.pretrain_end, "%Y-%m-%d")
+        if use_window:
+            test_start = datetime.strptime(args.start_date, "%Y-%m-%d")
+            if pre_end > test_start:
+                raise SystemExit("Config D pretrain window must end before --start-date "
+                                  "(no look-ahead into the test window)")
+
+        print(f"\nFetching Config D pretrain 1-min bars ({args.pretrain_start} to "
+              f"{args.pretrain_end}, cached, IEX feed)...")
+        pretrain_1hour = {}
+        for sym in symbols:
+            pdf = fetch_1min_window_cached(sym, pre_start, pre_end,
+                                            label=args.pretrain_cache_label,
+                                            force=args.force_refresh)
+            c, t = resample_intraday(pdf, 60)
+            pretrain_1hour[sym] = {"close": c, "ts": t}
+            print(f"  {sym}: {len(c):,} pretrain 1-hour bars")
+
+        print("\nTraining Config D's frozen ML hybrid model...")
+        frozen_model = train_ml_hybrid_model(pretrain_1hour)
+        ml_signal = MLHybridSignal(frozen_model)
+
+        print("\n" + "=" * 78)
+        print("  Running Config D: ML HYBRID (1-hour, GBM classifier, daily trend filter)")
+        print("=" * 78)
+        results.append(run_config(
+            "D_ml_hybrid", data_1hour, bars_per_day=6.5, lookback=50,
+            signal_fn=ml_signal, dte_fn=lambda sym: 10,
+            max_hold_days_fn=lambda sym: 5, min_hold_days=2,
+            trend=data_daily, trend_buffer_minutes=1440, ml_gate=None,
+            cooldown_bars=4, signal_check_interval=1,
+            symbols=symbols,
+        ))
 
     for r in results:
         print_mode_report(r)
