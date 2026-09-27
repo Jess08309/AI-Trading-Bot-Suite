@@ -43,30 +43,15 @@ def cache_path(symbol: str, label: str) -> str:
     return os.path.join(CACHE_DIR, f"{symbol}_{label}.csv")
 
 
-def fetch_1min_cached(symbol: str, days: int = 200, chunk_days: int = 15,
-                       force: bool = False) -> pd.DataFrame:
-    """
-    Fetch 1-minute bars for `symbol` covering the trailing `days` days,
-    downloaded in `chunk_days`-day windows (same chunking pattern as
-    download_5min.py) to respect Alpaca rate limits. Cached to
-    data/historical/{symbol}_1min_research.csv -- reruns load from cache
-    unless force=True, so the API is never re-hit for data already on disk.
-    """
-    path = cache_path(symbol, "1min_research")
-    if os.path.exists(path) and not force:
-        df = pd.read_csv(path)
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-        return df
-
+def _download_chunked(symbol: str, chunks: list, label: str) -> pd.DataFrame:
+    """Shared chunk-download loop used by both fetch_1min_cached and
+    fetch_1min_window_cached -- `chunks` is a list of (start, end) tuples."""
     client = _get_client()
-    end = datetime.now()
-    n_chunks = max(1, -(-days // chunk_days))
     all_bars = []
+    n_chunks = len(chunks)
 
-    for chunk in range(n_chunks):
-        chunk_end = end - timedelta(days=chunk * chunk_days)
-        chunk_start = chunk_end - timedelta(days=chunk_days)
-        print(f"  {symbol} 1min chunk {chunk + 1}/{n_chunks}: "
+    for i, (chunk_start, chunk_end) in enumerate(chunks):
+        print(f"  {symbol} {label} chunk {i + 1}/{n_chunks}: "
               f"{chunk_start.strftime('%Y-%m-%d')} to {chunk_end.strftime('%Y-%m-%d')}...")
         try:
             req = StockBarsRequest(
@@ -85,14 +70,70 @@ def fetch_1min_cached(symbol: str, days: int = 200, chunk_days: int = 15,
                     "close": float(b.close), "volume": float(b.volume),
                 })
         except Exception as e:
-            print(f"    {symbol} chunk {chunk + 1}/{n_chunks} error: {e}")
+            print(f"    {symbol} chunk {i + 1}/{n_chunks} error: {e}")
         time.sleep(0.3)
 
     if not all_bars:
-        raise RuntimeError(f"No 1-min bars downloaded for {symbol}")
+        raise RuntimeError(f"No 1-min bars downloaded for {symbol} ({label})")
 
     df = pd.DataFrame(all_bars)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df = df.sort_values("timestamp").drop_duplicates(subset="timestamp").reset_index(drop=True)
+    return df
+
+
+def fetch_1min_cached(symbol: str, days: int = 200, chunk_days: int = 15,
+                       force: bool = False) -> pd.DataFrame:
+    """
+    Fetch 1-minute bars for `symbol` covering the trailing `days` days,
+    downloaded in `chunk_days`-day windows (same chunking pattern as
+    download_5min.py) to respect Alpaca rate limits. Cached to
+    data/historical/{symbol}_1min_research.csv -- reruns load from cache
+    unless force=True, so the API is never re-hit for data already on disk.
+    """
+    path = cache_path(symbol, "1min_research")
+    if os.path.exists(path) and not force:
+        df = pd.read_csv(path)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        return df
+
+    end = datetime.now()
+    n_chunks = max(1, -(-days // chunk_days))
+    chunks = []
+    for chunk in range(n_chunks):
+        chunk_end = end - timedelta(days=chunk * chunk_days)
+        chunk_start = chunk_end - timedelta(days=chunk_days)
+        chunks.append((chunk_start, chunk_end))
+
+    df = _download_chunked(symbol, chunks, "1min")
+    df.to_csv(path, index=False)
+    return df
+
+
+def fetch_1min_window_cached(symbol: str, start: datetime, end: datetime, label: str,
+                              chunk_days: int = 15, force: bool = False) -> pd.DataFrame:
+    """
+    Fetch 1-minute bars for `symbol` covering an explicit [start, end) window
+    (e.g. a non-overlapping out-of-sample period), chunked the same way as
+    fetch_1min_cached. Cached to data/historical/{symbol}_{label}.csv -- use
+    a distinct `label` per window so different historical periods never
+    collide with or overwrite each other's cache.
+    """
+    path = cache_path(symbol, label)
+    if os.path.exists(path) and not force:
+        df = pd.read_csv(path)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        return df
+
+    total_days = max(1, (end - start).days)
+    n_chunks = max(1, -(-total_days // chunk_days))
+    chunks = []
+    cursor = start
+    while cursor < end:
+        chunk_end = min(end, cursor + timedelta(days=chunk_days))
+        chunks.append((cursor, chunk_end))
+        cursor = chunk_end
+
+    df = _download_chunked(symbol, chunks, label)
     df.to_csv(path, index=False)
     return df
