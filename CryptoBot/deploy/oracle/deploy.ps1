@@ -40,7 +40,7 @@ Log "Pulling latest on server..."
 Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'cd ~/AI-Trading-Bot-Suite && git pull --ff-only'"
 
 # ---------------------------------------------------------------------------
-#  2. Sync .env files (secrets — NOT in git)
+#  2. Sync .env files (secrets - NOT in git)
 # ---------------------------------------------------------------------------
 Log "Syncing .env files..."
 
@@ -82,7 +82,7 @@ if ($SyncState) {
 #  4. First deploy: copy setup files & run setup
 # ---------------------------------------------------------------------------
 if ($FirstDeploy) {
-    Log "First deploy — uploading setup files..."
+    Log "First deploy - uploading setup files..."
     Invoke-Expression "$SSH ${BOT_USER}@${ServerIP} 'mkdir -p ~/deploy'"
 
     $deployDir = "$RepoRoot\CryptoBot\deploy\oracle"
