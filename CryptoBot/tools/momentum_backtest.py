@@ -259,9 +259,10 @@ def compute_targets(prices: np.ndarray, symbols: Sequence[str], t: int,
         scores[sym] = float(mom)
         vols[sym] = float(vol)
 
+    sym_idx = {s: j for j, s in enumerate(symbols)}
     targets: Dict[str, float] = {}
     for sym in select_top_n(scores, cfg.top_n):
-        j = list(symbols).index(sym)
+        j = sym_idx[sym]
         notional = vol_scaled_notional(
             equity, float(hist[-1, j]), vols[sym], cfg.rebalance_days,
             cfg.risk_pct, cfg.notional_cap_pct)
@@ -765,7 +766,8 @@ def run_study(prices: pd.DataFrame, lookbacks: Sequence[int], primary: int,
               test_days: int, step_days: int, train_days: Optional[int],
               starting_equity: float, top_n: int, sims: int,
               btc_symbol: Optional[str], baseline_path: Path) -> Dict:
-    lookbacks = sorted(set(int(w) for w in lookbacks) | {int(primary)})
+    primary = int(primary)
+    lookbacks = sorted(set(int(w) for w in lookbacks) | {primary})
     costs = resolve_execution_costs()
     if train_days is None:
         # Common OOS start for every lookback: longest lookback + 1 day.
