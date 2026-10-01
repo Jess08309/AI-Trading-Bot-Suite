@@ -51,6 +51,7 @@ data/models/market_model.joblib
 data/historical/
 data/backtest/*.txt
 data/backtest/*.csv
+data/backtest/*.json
 data/state/
 data/history/
 data/trades.csv
