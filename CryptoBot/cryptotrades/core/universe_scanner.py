@@ -78,6 +78,13 @@ class ScannerConfig:
         'A7A5', 'HASH',
         # Known low-quality / pump-and-dump
         'BSB', 'QUQ', 'BTW', 'FF', 'CC', 'USAD', 'RESOLV', 'WLFI',
+        # Meme coins — wide spreads eat scalp edge before it starts
+        # (see execution_guard.py MAX_SPREAD_BPS gate); keep these out of
+        # dynamic discovery entirely rather than relying on the spread gate
+        # alone. DOGE is excluded from this list — it's an established,
+        # explicitly curated member of SPOT_SYMBOLS, not a scanner pick.
+        'PEPE', 'SHIB', 'BONK', 'WIF', 'FLOKI', 'TRUMP', 'MEME',
+        'BOME', 'POPCAT', 'MOG', 'TURBO',
     })
 
 

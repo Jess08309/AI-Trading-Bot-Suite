@@ -13,6 +13,10 @@ WorkingDirectory=/home/botuser/AI-Trading-Bot-Suite/CryptoBot
 ExecStart=/home/botuser/AI-Trading-Bot-Suite/CryptoBot/.venv/bin/python -u cryptotrades/main.py
 
 # Aggressive profile environment variables
+# Meme-coin containment — belt-and-suspenders alongside universe_scanner's
+# EXCLUDE_SYMBOLS: blocks these from entries even if manually added to
+# SPOT_SYMBOLS/FUTURES_SYMBOLS or re-discovered by the scanner.
+Environment=SYMBOL_BLACKLIST=PEPE/USD,SHIB/USD,BONK/USD,WIF/USD,FLOKI/USD,TRUMP/USD,MEME/USD,BOME/USD,POPCAT/USD,MOG/USD,TURBO/USD
 Environment=ENABLE_FUTURES=true
 Environment=ENABLE_COINBASE_FUTURES_DATA=true
 Environment=ENABLE_KRAKEN_FUTURES_FALLBACK=true
