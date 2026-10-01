@@ -54,6 +54,9 @@ data/backtest/*.csv
 data/state/
 data/history/
 data/trades.csv
+data/trade_journal.csv
+data/trade_journal.db
+data/state/symbol_expectancy.json
 tools/backtests/data/minute_prices.csv
 tools/backtests/data/hourly_prices.csv
 tools/backtests/data/state/

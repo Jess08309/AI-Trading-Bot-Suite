@@ -38,7 +38,7 @@ ALPACA_AVAILABLE = True  # Always available since we use requests directly
 # Real order execution uses alpaca-py's TradingClient
 try:
     from alpaca.trading.client import TradingClient
-    from alpaca.trading.requests import MarketOrderRequest
+    from alpaca.trading.requests import LimitOrderRequest
     from alpaca.trading.enums import OrderSide, TimeInForce
     from alpaca.common.exceptions import APIError
     ALPACA_TRADING_SDK_AVAILABLE = True
@@ -194,6 +194,26 @@ class TradingConfig:
     SLIPPAGE_BPS_SPOT: float = 5.0         # 0.05%
     SLIPPAGE_BPS_FUTURES: float = 8.0      # 0.08%
 
+    # Limit-order execution (spot) — market orders are never used. Buys rest at
+    # the bid, sells rest at the ask, and the trade is skipped entirely if the
+    # quoted spread is wider than MAX_SPREAD_BPS (protects against meme-coin
+    # style spreads eating the whole edge of a scalp).
+    MAX_SPREAD_BPS: float = 15.0
+    MIN_TAKE_PROFIT_PCT: float = 1.0       # Fee/spread-adjusted min gross profit floor
+    SPOT_ROUND_TRIP_FEE_PCT: float = 0.1   # Approx taker fee per leg, for the TP floor calc
+
+    # ATR-based stop-loss/take-profit (spot). Replaces a single fixed %
+    # with a volatility-scaled distance per position.
+    ATR_STOP_MULT: float = 1.5
+    ATR_TP_MULT: float = 2.0
+
+    # Risk-based position sizing cap — applied on top of confidence/Kelly
+    # sizing: never risk more than RISK_PCT_PER_TRADE of equity on a full
+    # stop-out, and never allocate more than NOTIONAL_CAP_PCT of equity
+    # notional to a single asset regardless of stop distance.
+    RISK_PCT_PER_TRADE: float = 0.01
+    NOTIONAL_CAP_PCT: float = 0.10
+
     # Liquidity gate — enabled: skip trades with insufficient orderbook depth
     USE_LIQUIDITY_GATE: bool = True
     ORDERBOOK_LEVELS: int = 10
@@ -282,6 +302,14 @@ class TradingConfig:
         self.STALE_EXIT_PROFIT_ARM_PCT = _env_float("STALE_EXIT_PROFIT_ARM_PCT_OVERRIDE", self.STALE_EXIT_PROFIT_ARM_PCT)
         self.STALE_EXIT_DECAY_PCT = _env_float("STALE_EXIT_DECAY_PCT_OVERRIDE", self.STALE_EXIT_DECAY_PCT)
 
+        self.MAX_SPREAD_BPS = _env_float("MAX_SPREAD_BPS_OVERRIDE", self.MAX_SPREAD_BPS)
+        self.MIN_TAKE_PROFIT_PCT = _env_float("MIN_TAKE_PROFIT_PCT_OVERRIDE", self.MIN_TAKE_PROFIT_PCT)
+        self.SPOT_ROUND_TRIP_FEE_PCT = _env_float("SPOT_ROUND_TRIP_FEE_PCT_OVERRIDE", self.SPOT_ROUND_TRIP_FEE_PCT)
+        self.ATR_STOP_MULT = _env_float("ATR_STOP_MULT_OVERRIDE", self.ATR_STOP_MULT)
+        self.ATR_TP_MULT = _env_float("ATR_TP_MULT_OVERRIDE", self.ATR_TP_MULT)
+        self.RISK_PCT_PER_TRADE = _env_float("RISK_PCT_PER_TRADE_OVERRIDE", self.RISK_PCT_PER_TRADE)
+        self.NOTIONAL_CAP_PCT = _env_float("NOTIONAL_CAP_PCT_OVERRIDE", self.NOTIONAL_CAP_PCT)
+
         # New quality filter overrides
         self.SIDE_MARKET_FILTER = _env_bool("SIDE_MARKET_FILTER_OVERRIDE", self.SIDE_MARKET_FILTER)
         self.SIDE_MARKET_ML_OVERRIDE = _env_float("SIDE_MARKET_ML_OVERRIDE_OVERRIDE", self.SIDE_MARKET_ML_OVERRIDE)
@@ -335,6 +363,14 @@ class TradingConfig:
             raise ValueError("MIN_ENSEMBLE_SCORE must be between 0 and 1")
         if self.MAX_CORRELATION <= 0 or self.MAX_CORRELATION > 1:
             raise ValueError("MAX_CORRELATION must be in (0, 1]")
+        if self.MAX_SPREAD_BPS <= 0:
+            raise ValueError("MAX_SPREAD_BPS must be > 0")
+        if self.MIN_TAKE_PROFIT_PCT <= 0:
+            raise ValueError("MIN_TAKE_PROFIT_PCT must be > 0")
+        if not 0 < self.RISK_PCT_PER_TRADE <= 1.0:
+            raise ValueError("RISK_PCT_PER_TRADE must be in (0, 1]")
+        if not 0 < self.NOTIONAL_CAP_PCT <= 1.0:
+            raise ValueError("NOTIONAL_CAP_PCT must be in (0, 1]")
         if self.SLIPPAGE_BPS_SPOT < 0 or self.SLIPPAGE_BPS_FUTURES < 0:
             raise ValueError("Slippage bps must be >= 0")
         if self.ORDERBOOK_LEVELS <= 0:
@@ -1540,6 +1576,29 @@ class TradingBot:
         self.symbol_unconfirmed_fill_strikes: Dict[str, int] = {}
         self.symbol_unconfirmed_fill_paused_until: Dict[str, datetime] = {}
 
+        # Order retry/backoff manager — halts a symbol's entries after repeated
+        # cancel/reject events instead of retrying blindly (see the HYPEUSD
+        # "8 cancelled buys in 13 min" incident this guards against).
+        from utils.order_retry import OrderRetryManager
+        self.order_retry_manager = OrderRetryManager(
+            max_retries=3, base_delay=2.0, max_delay=60.0,
+            backoff_factor=2.0, cooldown_minutes=60.0,
+        )
+
+        # Per-symbol expectancy tracker — auto-disables entries into a symbol
+        # with a clearly negative edge (3 consecutive losing round trips, or a
+        # negative trailing 20-trade expectancy).
+        from utils.expectancy_tracker import SymbolExpectancyTracker
+        self.expectancy_tracker = SymbolExpectancyTracker(
+            max_consecutive_losses=3, expectancy_window=20,
+        )
+        self.expectancy_tracker.load_state()
+
+        # Structured trade journal (timestamp, signal, entry/exit, mid-price at
+        # fill, slippage bps, pnl) persisted to CSV + SQLite.
+        from utils.trade_journal import TradeJournal
+        self.trade_journal = TradeJournal()
+
         # Per-direction performance tracker
         self.direction_recent_results: Dict[str, List[bool]] = {"LONG": [], "SHORT": []}
         self.direction_paused_until: Dict[str, Optional[datetime]] = {"LONG": None, "SHORT": None}
@@ -2402,60 +2461,173 @@ class TradingBot:
             self.logger.error(f"KRAKEN ORDER FAILED: CLOSE {symbol} size_usd=${size_usd:.2f}: {e}")
             return False
 
-    def _alpaca_buy_spot(self, symbol: str, notional: float) -> float:
-        """Submit a real Alpaca market buy for a spot crypto symbol.
+    def _fetch_spot_quote(self, symbol: str) -> Optional[Tuple[float, float]]:
+        """Fetch the latest (bid, ask) for an Alpaca crypto spot symbol."""
+        try:
+            url = f"{ALPACA_DATA_URL}/latest/quotes?symbols={symbol}"
+            headers = {}
+            if self._alpaca_session:
+                headers = dict(self._alpaca_session.headers)
+            resp = requests.get(url, timeout=8, headers=headers)
+            resp.raise_for_status()
+            payload = resp.json()
+            quotes = payload.get("quotes", {})
+            quote = quotes.get(symbol)
+            if not quote:
+                return None
+            bid = quote.get("bp")
+            ask = quote.get("ap")
+            if bid is None or ask is None:
+                return None
+            return float(bid), float(ask)
+        except Exception as e:
+            self.logger.debug(f"Alpaca quote fetch failed for {symbol}: {e}")
+            return None
 
+    def _alpaca_asset_tradable(self, symbol: str) -> Tuple[bool, bool, str]:
+        """Pre-trade validation: is the asset tradable and fractionable per GET /v2/assets?
+
+        Returns (tradable, fractionable, reason). Fails OPEN (tradable=True) if
+        the check itself errors, so a transient API hiccup never silently
+        blocks all trading — but any explicit `tradable=False`/404 blocks it.
+        """
+        if not self.trading_client:
+            return True, True, "no_trading_client"
+        try:
+            asset = self.trading_client.get_asset(symbol.replace("/", ""))
+            tradable = bool(getattr(asset, "tradable", True))
+            fractionable = bool(getattr(asset, "fractionable", True))
+            if not tradable:
+                return False, fractionable, "asset_not_tradable"
+            return tradable, fractionable, "ok"
+        except APIError as e:
+            if e.status_code == 404:
+                return False, False, "asset_not_found"
+            return True, True, f"asset_check_error:{e}"
+        except Exception as e:
+            return True, True, f"asset_check_error:{e}"
+
+    def _alpaca_has_buying_power(self, notional: float) -> Tuple[bool, str]:
+        """Pre-trade validation: does the account have enough buying power?"""
+        if not self.trading_client:
+            return True, "no_trading_client"
+        try:
+            account = self.trading_client.get_account()
+            buying_power = float(getattr(account, "buying_power", 0) or 0)
+            if buying_power < notional:
+                return False, f"insufficient_buying_power (${buying_power:.2f} < ${notional:.2f})"
+            return True, "ok"
+        except Exception as e:
+            # Fail open — a transient account-check error shouldn't block every trade,
+            # the order itself will still be rejected by the broker if underfunded.
+            return True, f"buying_power_check_error:{e}"
+
+    def _alpaca_buy_spot(self, symbol: str, notional: float) -> float:
+        """Submit a real Alpaca LIMIT buy (resting at the bid) for a spot crypto symbol.
+
+        Market orders are never used — see execution_guard.passes_spread_gate.
         Returns the CONFIRMED filled qty. Returns 0.0 if the order failed to
-        submit OR if the fill could not be confirmed within the poll window —
-        callers MUST treat 0.0 as "do not track this as an open position",
-        never as "filled with qty 0" (this is the bug class that created the
-        ONDO/HYPE phantom positions — see fix/cryptobot-fill-confirmation).
+        submit, was skipped by a pre-trade gate, OR if the fill could not be
+        confirmed within the poll window — callers MUST treat 0.0 as "do not
+        track this as an open position", never as "filled with qty 0" (this is
+        the bug class that created the ONDO/HYPE phantom positions — see
+        fix/cryptobot-fill-confirmation).
         On an unconfirmed fill this also attempts to cancel the resting order
         so it can't fill later behind the bot's back with no local record.
         """
+        from utils.execution_guard import passes_spread_gate, limit_price_for_side
+
         if not self.trading_client:
             return 0.0
+
+        if self.order_retry_manager.is_halted(symbol):
+            self.logger.warning(f"ALPACA BUY {symbol}: skipped — halted after repeated cancel/reject retries")
+            return 0.0
+
+        quote = self._fetch_spot_quote(symbol)
+        if not quote:
+            self.logger.warning(f"ALPACA BUY {symbol}: skipped — no quote available for limit pricing")
+            return 0.0
+        bid, ask = quote
+        ok, spread_bps = passes_spread_gate(bid, ask, max_spread_bps=cfg.MAX_SPREAD_BPS)
+        if not ok:
+            self.logger.warning(
+                f"ALPACA BUY {symbol}: skipped — spread {spread_bps:.1f}bps > {cfg.MAX_SPREAD_BPS}bps gate"
+            )
+            return 0.0
+
+        tradable, fractionable, reason = self._alpaca_asset_tradable(symbol)
+        if not tradable:
+            self.logger.warning(f"ALPACA BUY {symbol}: skipped — pre-trade asset check failed ({reason})")
+            return 0.0
+
+        has_power, power_reason = self._alpaca_has_buying_power(notional)
+        if not has_power:
+            self.logger.warning(f"ALPACA BUY {symbol}: skipped — {power_reason}")
+            return 0.0
+
+        limit_price = limit_price_for_side(bid, ask, side="buy")
+        qty = notional / limit_price
+        if not fractionable:
+            qty = float(int(qty))
+            if qty <= 0:
+                self.logger.warning(f"ALPACA BUY {symbol}: skipped — notional too small for non-fractionable asset")
+                return 0.0
         try:
-            order = self.trading_client.submit_order(MarketOrderRequest(
+            order = self.trading_client.submit_order(LimitOrderRequest(
                 symbol=symbol,
-                notional=round(notional, 2),
+                qty=qty,
                 side=OrderSide.BUY,
                 time_in_force=TimeInForce.GTC,
+                limit_price=limit_price,
             ))
-            # Crypto market orders usually fill near-instantly; poll for the fill qty.
+            # Crypto limit orders can rest briefly; poll for the fill qty.
             # Extended from 3x1s to 6x2s (12s total) to reduce false-negative timeouts.
             for _ in range(6):
                 filled = getattr(order, "filled_qty", None)
                 if filled and float(filled) > 0:
                     self._reset_symbol_unconfirmed_fill_strikes(symbol)
+                    self.order_retry_manager.record_success(symbol)
                     self.logger.info(f"ALPACA ORDER: BUY {symbol} filled_qty={filled} order_id={order.id}")
                     return float(filled)
                 time.sleep(2)
                 order = self.trading_client.get_order_by_id(order.id)
             self._record_symbol_unconfirmed_fill(symbol, reason="unconfirmed_fill")
+            retry_state = self.order_retry_manager.record_failure(symbol)
             self.logger.warning(
                 f"ALPACA ORDER: BUY {symbol} submitted (id={order.id}) but fill NOT CONFIRMED "
-                f"after poll window — treating as unfilled, will NOT be tracked as a position"
+                f"after poll window — treating as unfilled, will NOT be tracked as a position "
+                f"(retry attempt {retry_state['attempts']}, halted={retry_state['halted']})"
             )
             try:
                 self.trading_client.cancel_order_by_id(order.id)
             except Exception:
                 pass  # best-effort — order may have already filled/expired
+            if retry_state["delay"] > 0:
+                time.sleep(min(retry_state["delay"], 5.0))  # bounded — don't block the main loop too long
             return 0.0
         except Exception as e:
-            self.logger.error(f"ALPACA ORDER FAILED: BUY {symbol} notional=${notional:.2f}: {e}")
+            retry_state = self.order_retry_manager.record_failure(symbol)
+            self.logger.error(
+                f"ALPACA ORDER FAILED: BUY {symbol} notional=${notional:.2f}: {e} "
+                f"(retry attempt {retry_state['attempts']}, halted={retry_state['halted']})"
+            )
             return 0.0
 
     def _alpaca_sell_spot(self, symbol: str, qty: float) -> float:
-        """Submit a real Alpaca market sell to close (or reduce) a spot crypto position.
+        """Submit a real Alpaca LIMIT sell (resting at the ask) to close (or
+        reduce) a spot crypto position.
 
+        Market orders are never used — see execution_guard.passes_spread_gate.
         Returns the CONFIRMED sold qty — may be less than requested on a
-        partial fill, or 0.0 if the order failed / could not be confirmed.
-        Callers MUST check the return value against the requested qty before
-        assuming the position is fully closed at the broker (this is the bug
-        class that created the AAVE/PEPE/UNI orphans — see
-        fix/cryptobot-fill-confirmation).
+        partial fill, or 0.0 if the order failed / was skipped by a pre-trade
+        gate / could not be confirmed. Callers MUST check the return value
+        against the requested qty before assuming the position is fully closed
+        at the broker (this is the bug class that created the AAVE/PEPE/UNI
+        orphans — see fix/cryptobot-fill-confirmation).
         """
+        from utils.execution_guard import passes_spread_gate, limit_price_for_side
+
         if not self.trading_client or qty <= 0:
             return 0.0
         # Crypto trading fees are deducted from the base asset, so the tracked fill
@@ -2473,14 +2645,29 @@ class TradingBot:
         if qty <= 0:
             self.logger.warning(f"ALPACA SELL {symbol}: broker reports nothing available to sell — skipping order")
             return 0.0
+
+        quote = self._fetch_spot_quote(symbol)
+        if not quote:
+            self.logger.warning(f"ALPACA SELL {symbol}: skipped — no quote available for limit pricing")
+            return 0.0
+        bid, ask = quote
+        ok, spread_bps = passes_spread_gate(bid, ask, max_spread_bps=cfg.MAX_SPREAD_BPS)
+        if not ok:
+            self.logger.warning(
+                f"ALPACA SELL {symbol}: skipped — spread {spread_bps:.1f}bps > {cfg.MAX_SPREAD_BPS}bps gate"
+            )
+            return 0.0
+        limit_price = limit_price_for_side(bid, ask, side="sell")
+
         try:
-            order = self.trading_client.submit_order(MarketOrderRequest(
+            order = self.trading_client.submit_order(LimitOrderRequest(
                 symbol=symbol,
                 qty=qty,
                 side=OrderSide.SELL,
                 time_in_force=TimeInForce.GTC,
+                limit_price=limit_price,
             ))
-            # Crypto market orders usually fill near-instantly; poll briefly for the fill qty
+            # Crypto limit orders can rest briefly; poll briefly for the fill qty
             for _ in range(6):
                 filled = getattr(order, "filled_qty", None)
                 if filled and float(filled) > 0:
@@ -2492,6 +2679,10 @@ class TradingBot:
                 f"ALPACA ORDER: SELL {symbol} submitted (id={order.id}) but fill NOT CONFIRMED "
                 f"after poll window — requested qty={qty} may still be open at the broker"
             )
+            try:
+                self.trading_client.cancel_order_by_id(order.id)
+            except Exception:
+                pass
             return 0.0
         except Exception as e:
             self.logger.error(f"ALPACA ORDER FAILED: SELL {symbol} qty={qty}: {e}")
@@ -3583,13 +3774,44 @@ class TradingBot:
         self.risk_manager.record_trade(pnl_value)
         self._log_trade_csv(position, fill_price, pnl_value, reason)
 
+        realized_pct = (pnl_value / max(position.size, 1e-12)) * 100
+
         # Track per-symbol results for auto-pause
         self._record_symbol_result(symbol, is_win=(pnl_value > 0))
+
+        # Per-symbol expectancy tracker — auto-disables entries into a symbol
+        # with 3 consecutive losing round trips or negative 20-trade expectancy.
+        base_symbol = symbol.split('__')[0]
+        just_disabled, disable_reason = self.expectancy_tracker.record_round_trip(base_symbol, realized_pct)
+        self.expectancy_tracker.save_state()
+        if just_disabled:
+            self.logger.warning(f"SYMBOL EXPECTANCY DISABLE: {base_symbol} — {disable_reason}")
+
+        # Structured trade journal (CSV + SQLite)
+        try:
+            from utils.trade_journal import TradeJournalEntry
+            mid_price_at_fill = fill_price
+            quote = self._fetch_spot_quote(symbol) if not is_futures else None
+            if quote:
+                mid_price_at_fill = (quote[0] + quote[1]) / 2.0
+            self.trade_journal.record(TradeJournalEntry(
+                symbol=symbol,
+                signal=position.entry_reason,
+                side="sell" if position.direction == "LONG" else "buy",
+                entry_price=position.entry_price,
+                exit_price=fill_price,
+                mid_price_at_fill=mid_price_at_fill,
+                size_usd=position.size,
+                pnl_usd=pnl_value,
+                pnl_pct=realized_pct,
+                exit_reason=reason,
+            ))
+        except Exception as e:
+            self.logger.debug(f"Trade journal write failed for {symbol}: {e}")
 
         # Track per-direction results for direction pause
         self._record_direction_result(position.direction, is_win=(pnl_value > 0))
 
-        realized_pct = (pnl_value / max(position.size, 1e-12)) * 100
         self.logger.info(
             f"CLOSE {position.direction} {symbol} @ ${fill_price:.2f} | {reason} | "
             f"P&L: ${pnl_value:+.2f} ({realized_pct:+.2f}%)"
@@ -3606,6 +3828,11 @@ class TradingBot:
     def _is_symbol_paused(self, symbol: str) -> bool:
         """Check if symbol is auto-paused due to consecutive losses."""
         if self._is_symbol_unconfirmed_fill_paused(symbol):
+            return True
+        base_symbol = symbol.split('__')[0]
+        disabled, reason = self.expectancy_tracker.is_disabled(base_symbol)
+        if disabled:
+            self.logger.debug(f"ENTRY BLOCKED: {base_symbol} — expectancy tracker disabled ({reason})")
             return True
         pause_until = self.symbol_paused_until.get(symbol)
         if pause_until and datetime.now() < pause_until:
@@ -4437,15 +4664,57 @@ class TradingBot:
                 "rl_confidence": round(float(rl_decision.get("confidence", 0.5)), 4),
             })
 
-            # Set stops
+            # Set stops — ATR-scaled for spot (volatility-aware, with a hard
+            # min-take-profit floor); fixed % for futures (unchanged).
             stop_loss_pct = cfg.FUTURES_STOP_LOSS if is_futures else cfg.STOP_LOSS_PCT
             take_profit_pct = cfg.FUTURES_TAKE_PROFIT if is_futures else cfg.TAKE_PROFIT_PCT
-            if signal.direction == "LONG":
+            if not is_futures:
+                try:
+                    from utils.execution_guard import atr_stop_take_profit
+                    from utils.technical_indicators import atr_approx
+                    hist = self.market_data.price_history.get(signal.symbol, [])
+                    atr_series = atr_approx(hist, period=14) if len(hist) >= 15 else None
+                    atr_val = float(atr_series[-1]) if atr_series is not None and not np.isnan(atr_series[-1]) else 0.0
+                    if atr_val > 0:
+                        atr_levels = atr_stop_take_profit(
+                            entry_price=price,
+                            atr=atr_val,
+                            side=signal.direction,
+                            stop_mult=cfg.ATR_STOP_MULT,
+                            tp_mult=cfg.ATR_TP_MULT,
+                            min_tp_pct=cfg.MIN_TAKE_PROFIT_PCT,
+                        )
+                        stop = atr_levels["stop_price"]
+                        target = atr_levels["take_profit_price"]
+                    else:
+                        stop = price * (1 + stop_loss_pct / 100) if signal.direction == "LONG" else price * (1 - stop_loss_pct / 100)
+                        target = price * (1 + take_profit_pct / 100) if signal.direction == "LONG" else price * (1 - take_profit_pct / 100)
+                except Exception as e:
+                    self.logger.debug(f"ATR stop/TP calc failed for {signal.symbol}, using fixed %: {e}")
+                    stop = price * (1 + stop_loss_pct / 100) if signal.direction == "LONG" else price * (1 - stop_loss_pct / 100)
+                    target = price * (1 + take_profit_pct / 100) if signal.direction == "LONG" else price * (1 - take_profit_pct / 100)
+            elif signal.direction == "LONG":
                 stop = price * (1 + stop_loss_pct / 100)
                 target = price * (1 + take_profit_pct / 100)
             else:
                 stop = price * (1 - stop_loss_pct / 100)
                 target = price * (1 - take_profit_pct / 100)
+
+            # Risk-capped sizing: never risk more than cfg.RISK_PCT_PER_TRADE of
+            # equity on a full stop-out, and cap notional at cfg.NOTIONAL_CAP_PCT
+            # of equity regardless of stop distance — applied on top of the
+            # confidence/Kelly size computed above.
+            try:
+                from utils.risk_sizing import calculate_risk_capped_size
+                equity = self.balance_futures if is_futures else self.balance_spot
+                risk_cap = calculate_risk_capped_size(
+                    equity=equity, entry_price=price, stop_price=stop,
+                    risk_pct=cfg.RISK_PCT_PER_TRADE, notional_cap_pct=cfg.NOTIONAL_CAP_PCT,
+                )
+                if risk_cap["notional"] > 0:
+                    size = min(size, risk_cap["notional"])
+            except Exception as e:
+                self.logger.debug(f"Risk-capped sizing failed for {signal.symbol}: {e}")
 
             # Create position
             position = Position(
