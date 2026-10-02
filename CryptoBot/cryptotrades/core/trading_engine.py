@@ -38,8 +38,8 @@ ALPACA_AVAILABLE = True  # Always available since we use requests directly
 # Real order execution uses alpaca-py's TradingClient
 try:
     from alpaca.trading.client import TradingClient
-    from alpaca.trading.requests import LimitOrderRequest
-    from alpaca.trading.enums import OrderSide, TimeInForce
+    from alpaca.trading.requests import LimitOrderRequest, GetOrdersRequest
+    from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
     from alpaca.common.exceptions import APIError
     ALPACA_TRADING_SDK_AVAILABLE = True
 except Exception:
@@ -47,6 +47,9 @@ except Exception:
 ALPACA_DATA_URL = "https://data.alpaca.markets/v1beta3/crypto/us"
 _ALPACA_QTY_UNSET = object()
 _ALPACA_ZERO_QTY_RECONCILE_CONFIRMATIONS = 2
+# Seconds to wait for Alpaca to process cancellations of opposite-side (BUY)
+# orders before submitting a SELL — avoids wash-trade rejection 40310000.
+_WASH_TRADE_CANCEL_WAIT_SEC = 1.5
 
 # Real order execution for Kraken Futures (in-house signed REST client)
 from core.kraken_futures_client import KrakenFuturesClient
@@ -2659,6 +2662,12 @@ class TradingBot:
             return 0.0
         limit_price = limit_price_for_side(bid, ask, side="sell")
 
+        if not self._cancel_opposing_buy_orders(symbol):
+            # Opposite-side BUY still open — Alpaca would reject this SELL as a
+            # potential wash trade (40310000). Skip this cycle; the caller keeps
+            # the position tracked and retries on the next loop.
+            return 0.0
+
         try:
             order = self.trading_client.submit_order(LimitOrderRequest(
                 symbol=symbol,
@@ -2687,6 +2696,70 @@ class TradingBot:
         except Exception as e:
             self.logger.error(f"ALPACA ORDER FAILED: SELL {symbol} qty={qty}: {e}")
             return 0.0
+
+    def _open_buy_orders(self, symbol: str) -> list:
+        """Return open BUY orders at Alpaca for `symbol` (one filtered query)."""
+        orders = self.trading_client.get_orders(filter=GetOrdersRequest(
+            status=QueryOrderStatus.OPEN,
+            side=OrderSide.BUY,
+            symbols=[symbol],
+        )) or []
+        norm = symbol.replace("/", "").upper()
+        return [
+            o for o in orders
+            if str(getattr(o, "symbol", "")).replace("/", "").upper() == norm
+            and str(getattr(getattr(o, "side", ""), "value", getattr(o, "side", ""))).lower() == "buy"
+        ]
+
+    def _cancel_opposing_buy_orders(self, symbol: str) -> bool:
+        """Cancel any open BUY orders on `symbol` before a SELL is submitted.
+
+        Alpaca rejects a SELL with "potential wash trade detected" (code
+        40310000) while an opposite-side order rests on the same symbol, which
+        left SHIB/USD and ONDO/USD stuck in an endless close-retry loop.
+
+        Returns True when it is safe to submit the SELL. Common path (no open
+        buys) costs exactly one filtered query and no sleep.
+        - Query failure: returns True (fail open = pre-fix behavior; the SELL
+          is still attempted and any broker rejection is logged as before).
+        - Cancel failure, or a BUY still open after the single re-check:
+          returns False so the SELL is skipped this cycle. Submitting it would
+          just be rejected as a wash trade again, and skipping avoids racing a
+          BUY that may still fill; the caller keeps the position tracked and
+          retries next loop. Retry/cooldown state is deliberately not touched.
+        """
+        try:
+            open_buys = self._open_buy_orders(symbol)
+        except Exception as e:
+            self.logger.warning(f"ALPACA SELL {symbol}: open-order check failed ({e}) — proceeding with sell")
+            return True
+        if not open_buys:
+            return True
+
+        cancel_failed = False
+        for o in open_buys:
+            try:
+                self.trading_client.cancel_order_by_id(o.id)
+                self.logger.info(
+                    f"ALPACA SELL {symbol}: cancelled opposing BUY order {o.id} to avoid wash-trade rejection"
+                )
+            except Exception as e:
+                cancel_failed = True
+                self.logger.error(f"ALPACA SELL {symbol}: failed to cancel opposing BUY order {o.id}: {e}")
+
+        time.sleep(_WASH_TRADE_CANCEL_WAIT_SEC)
+        try:
+            remaining = self._open_buy_orders(symbol)
+        except Exception as e:
+            self.logger.warning(f"ALPACA SELL {symbol}: open-order re-check failed ({e})")
+            return not cancel_failed
+        if remaining:
+            self.logger.warning(
+                f"ALPACA SELL {symbol}: {len(remaining)} opposing BUY order(s) still open after cancel — "
+                f"skipping sell this cycle to avoid wash-trade rejection (will retry)"
+            )
+            return False
+        return True
 
     def _alpaca_spot_available_qty(self, symbol: str) -> Tuple[Optional[float], bool]:
         """Return (available_qty, used_explicit_qty_available) for a live Alpaca spot position."""
