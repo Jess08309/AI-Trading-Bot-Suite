@@ -519,6 +519,67 @@ class TestFillConfirmation(unittest.TestCase):
         bot.risk_manager.record_trade.assert_called_once()
 
 
+class TestCancelOpposingBuyOrders(unittest.TestCase):
+    """Tests for the Alpaca wash-trade fix: a resting opposing BUY order on
+    the same symbol causes Alpaca to reject a SELL as a wash trade, which
+    previously blocked position exits outright. _cancel_opposing_buy_orders
+    must clear any such order (best-effort) before the sell is submitted.
+    """
+
+    def _make_bot(self):
+        from cryptotrades.core.trading_engine import TradingBot
+        bot = TradingBot.__new__(TradingBot)
+        bot.logger = MagicMock()
+        bot.trading_client = MagicMock()
+        return bot
+
+    def test_no_open_orders_is_a_noop(self):
+        """No resting BUY orders — nothing to cancel, no errors raised."""
+        bot = self._make_bot()
+        bot.trading_client.get_orders.return_value = []
+
+        result = bot._cancel_opposing_buy_orders("BTC/USD")
+
+        self.assertEqual(result, 0)
+        bot.trading_client.cancel_order_by_id.assert_not_called()
+
+    def test_open_buy_order_is_cancelled_before_sell(self):
+        """A resting opposing BUY order must be cancelled, and the broker
+        re-checked once to confirm it actually cleared."""
+        bot = self._make_bot()
+        open_order = MagicMock(id="buy-order-1")
+        bot.trading_client.get_orders.side_effect = [[open_order], []]
+
+        with patch("cryptotrades.core.trading_engine.time.sleep"):
+            result = bot._cancel_opposing_buy_orders("BTC/USD")
+
+        self.assertEqual(result, 1)
+        bot.trading_client.cancel_order_by_id.assert_called_once_with("buy-order-1")
+        self.assertEqual(bot.trading_client.get_orders.call_count, 2)
+
+    def test_cancel_failure_is_handled_and_does_not_raise(self):
+        """A cancel API failure must be swallowed (best-effort) — the sell
+        attempt must never be blocked by this guard."""
+        bot = self._make_bot()
+        open_order = MagicMock(id="buy-order-2")
+        bot.trading_client.get_orders.return_value = [open_order]
+        bot.trading_client.cancel_order_by_id.side_effect = Exception("cancel failed")
+
+        result = bot._cancel_opposing_buy_orders("BTC/USD")
+
+        self.assertEqual(result, 1)
+        bot.trading_client.cancel_order_by_id.assert_called_once_with("buy-order-2")
+
+    def test_no_trading_client_is_a_noop(self):
+        """Without a live trading client, the guard must be a safe no-op."""
+        bot = self._make_bot()
+        bot.trading_client = None
+
+        result = bot._cancel_opposing_buy_orders("BTC/USD")
+
+        self.assertEqual(result, 0)
+
+
 class TestUnconfirmedFillCooldown(unittest.TestCase):
     """Tests for per-symbol unconfirmed-fill strike/cooldown entry blocking."""
 
