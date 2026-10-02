@@ -1,5 +1,5 @@
 [Unit]
-Description=CryptoBot - Spot + Futures Crypto Trading (24/7)
+Description=CryptoBot - Spot + Futures Crypto Trading (DigitalOcean)
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=600
