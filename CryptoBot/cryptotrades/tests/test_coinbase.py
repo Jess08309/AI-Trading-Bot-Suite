@@ -1,9 +1,11 @@
 """Offline Coinbase client and production spot broker integration tests."""
 import base64
+import json
 import logging
 import os
 import sys
 from types import SimpleNamespace
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import jwt
@@ -134,6 +136,12 @@ def test_invalid_side(client):
 def test_order_rejection(client):
     client._session.request.return_value = response({"success": False})
     with pytest.raises(CoinbaseOrderRejected):
+        client.place_market_order("BTC/USD", "BUY", quote_size=10)
+
+
+def test_malformed_order_response_is_ambiguous_not_rejected(client):
+    client._session.request.return_value = response({})
+    with pytest.raises(RuntimeError, match="ambiguous"):
         client.place_market_order("BTC/USD", "BUY", quote_size=10)
 
 
@@ -311,7 +319,8 @@ def test_coinbase_market_data(bot):
 
 def test_coinbase_balance_errors_never_confirm_zero(bot):
     bot.coinbase_client.get_accounts.return_value = {
-        "accounts": [{"currency": "BTC", "available_balance": {"value": "0"}}],
+        "accounts": [{"currency": "BTC", "available_balance": {"value": "0"},
+                      "hold": {"value": "0"}}],
     }
     assert bot._spot_available_qty("BTC/USD") == (0, True)
     assert bot._confirm_zero_broker_qty("BTC/USD")
@@ -357,3 +366,164 @@ def test_broker_switch_protects_existing_positions(bot):
     bot.positions = {"BTC/USD": SimpleNamespace(broker_qty=1, spot_broker="alpaca")}
     with pytest.raises(RuntimeError, match="switching"):
         bot._validate_spot_broker_positions()
+
+
+@pytest.mark.parametrize("enabled,key,secret", [
+    ("false", KEY_NAME, "test-placeholder"),
+    ("true", "", "test-placeholder"),
+    ("true", KEY_NAME, ""),
+])
+def test_startup_falls_back_to_alpaca(bot, monkeypatch, enabled, key, secret):
+    monkeypatch.setenv("ENABLE_COINBASE", enabled)
+    monkeypatch.setenv("COINBASE_API_KEY", key)
+    monkeypatch.setenv("COINBASE_API_SECRET", secret)
+    monkeypatch.setenv("ALPACA_API_KEY", "test-placeholder")
+    monkeypatch.setenv("ALPACA_API_SECRET", "test-placeholder")
+    with patch.object(trading_engine, "CoinbaseClient") as coinbase, \
+            patch.object(trading_engine, "TradingClient") as alpaca, \
+            patch.object(trading_engine.requests, "Session"), patch.object(bot, "_init_kraken_futures"):
+        bot._init_api()
+    assert bot.spot_broker == "alpaca"
+    alpaca.assert_called_once()
+    coinbase.assert_not_called()
+
+
+def test_startup_coinbase_live_requires_confirmation(bot, monkeypatch):
+    monkeypatch.setenv("ENABLE_COINBASE", "true")
+    monkeypatch.setenv("COINBASE_API_KEY", KEY_NAME)
+    monkeypatch.setenv("COINBASE_API_SECRET", "test-placeholder")
+    monkeypatch.setenv("PAPER_TRADING", "false")
+    monkeypatch.delenv("LIVE_TRADING_CONFIRM", raising=False)
+    monkeypatch.setattr(trading_engine.cfg, "PAPER_TRADING", True)
+    with patch.object(trading_engine, "CoinbaseClient") as constructor, \
+            pytest.raises(RuntimeError, match="Live trading blocked"):
+        bot._init_api()
+    constructor.assert_not_called()
+
+
+def test_paper_env_overrides_live_locked_profile(bot, monkeypatch):
+    monkeypatch.setenv("ENABLE_COINBASE", "true")
+    monkeypatch.setenv("COINBASE_API_KEY", KEY_NAME)
+    monkeypatch.setenv("COINBASE_API_SECRET", "test-placeholder")
+    monkeypatch.setenv("PAPER_TRADING", "true")
+    monkeypatch.setattr(trading_engine.cfg, "PAPER_TRADING", False)
+    with patch.object(trading_engine, "CoinbaseClient", return_value=bot.coinbase_client) as constructor, \
+            patch.object(bot, "_init_kraken_futures"):
+        bot._init_api()
+    assert trading_engine.cfg.PAPER_TRADING
+    assert constructor.call_args.kwargs["paper_trading"]
+
+
+def test_filled_order_marker_cleared_only_after_positions_saved(bot, monkeypatch, tmp_path):
+    monkeypatch.setattr(trading_engine, "__file__", str(tmp_path / "core" / "trading_engine.py"))
+    bot._coinbase_order_resolved = True
+    with open(bot._coinbase_pending_path, "w") as pending:
+        json.dump({"client_order_id": "test-order"}, pending)
+    # Other state is deliberately absent: the position ledger must be persisted
+    # before clearing the latch, even if a later balance/history write fails.
+    bot._save_state()
+    assert json.loads((tmp_path / "data" / "state" / "positions.json").read_text()) == {}
+    assert not os.path.exists(bot._coinbase_pending_path)
+    assert not bot._coinbase_order_resolved
+
+
+def test_failed_position_save_keeps_marker(bot, monkeypatch):
+    bot._coinbase_order_resolved = True
+    with open(bot._coinbase_pending_path, "w") as pending:
+        pending.write("{}")
+    with patch.object(trading_engine.os, "makedirs", side_effect=OSError()):
+        bot._save_state()
+    assert os.path.exists(bot._coinbase_pending_path)
+
+
+def test_runtime_fingerprint_never_serializes_credentials(bot, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(trading_engine.cfg, "COINBASE_API_KEY", KEY_NAME)
+    monkeypatch.setattr(trading_engine.cfg, "COINBASE_API_SECRET", "test-placeholder")
+    bot.ml_model = SimpleNamespace(model_path="missing-model")
+    for name in ["direction_bias", "direction_bias_strength", "enable_futures_data",
+                 "enable_kraken_futures_fallback", "rl_shadow_mode", "rl_shadow_min_multiplier",
+                 "rl_live_size_control", "rl_live_size_min_mult", "rl_live_size_max_mult",
+                 "use_locked_profile", "locked_profile_path"]:
+        setattr(bot, name, False)
+    bot._save_runtime_fingerprint()
+    for path in (tmp_path / "data" / "state").glob("runtime_fingerprint*"):
+        text = path.read_text()
+        assert KEY_NAME not in text
+        assert "test-placeholder" not in text
+        assert "COINBASE_API_SECRET" not in text
+    assert (tmp_path / "data" / "state" / "runtime_fingerprint_latest.json").exists()
+
+
+def test_production_paper_signal_tracks_simulated_position(bot, monkeypatch, caplog):
+    monkeypatch.setattr(trading_engine.cfg, "PAPER_TRADING", True)
+    bot.risk_manager = MagicMock(consecutive_wins=0, consecutive_losses=0)
+    bot.risk_manager.can_trade.return_value = (True, "")
+    bot.risk_manager.calculate_position_size.return_value = 100
+    bot.market_data = MagicMock(price_history={"BTC/USD": [50000]})
+    bot.market_data.calculate_volatility.return_value = 0.01
+    bot.balance_spot = bot.balance_futures = 1000
+    bot._current_regime = None
+    bot._regime_flip_state = {}
+    bot.rl_live_size_control = False
+    bot.ml_challenger_shadow_mode = False
+    bot._is_symbol_paused = MagicMock(return_value=False)
+    bot._rl_shadow_decision = MagicMock(return_value={})
+    bot._passes_correlation_gate = MagicMock(return_value=(True, 0))
+    bot._passes_liquidity_gate = MagicMock(return_value=(True, 10000))
+    bot._shadow_open_position = MagicMock()
+    bot._shadow_record_event = MagicMock()
+    bot._save_state = MagicMock()
+    signal = SimpleNamespace(symbol="BTC/USD", direction="LONG", confidence=0.9,
+                             reason="test", timestamp=datetime.now())
+    with caplog.at_level(logging.INFO):
+        bot.execute_signals([signal])
+    assert bot.positions["BTC/USD"].broker_qty == 0
+    assert bot.positions["BTC/USD"].spot_broker == "coinbase"
+    assert "COINBASE PAPER: Would BUY" in caplog.text
+    bot.coinbase_client.place_market_order.assert_not_called()
+
+
+def test_held_coinbase_funds_keep_position_tracked(bot, monkeypatch):
+    monkeypatch.setattr(trading_engine.cfg, "PAPER_TRADING", False)
+    bot.coinbase_client.get_accounts.return_value = {
+        "accounts": [{"currency": "BTC", "available_balance": {"value": "0"},
+                      "hold": {"value": "1"}}],
+    }
+    assert bot._spot_available_qty("BTC/USD") == (0, True)
+    assert not bot._confirm_zero_broker_qty("BTC/USD")
+    bot.positions = {"BTC/USD": trading_engine.Position(
+        symbol="BTC/USD", direction="LONG", entry_price=50000, size=50000,
+        entry_time=datetime.now(), stop_loss=49000, take_profit=52000,
+        max_price=50000, broker_qty=1, spot_broker="coinbase",
+    )}
+    bot._sell_spot = MagicMock(return_value=0)
+    bot._save_state = MagicMock()
+    bot._should_reconcile_dust = MagicMock(return_value=False)
+    for _ in range(3):
+        bot._close_position("BTC/USD", 50000, "STOP_LOSS", 0)
+    assert bot.positions["BTC/USD"].broker_qty == 1
+    assert bot.positions["BTC/USD"].broker_zero_qty_confirmations == 0
+
+
+def test_alpaca_fallback_live_requires_early_confirmation(bot, monkeypatch):
+    monkeypatch.setenv("ENABLE_COINBASE", "false")
+    monkeypatch.delenv("LIVE_TRADING_CONFIRM", raising=False)
+    monkeypatch.setattr(trading_engine.cfg, "PAPER_TRADING", False)
+    with patch.object(trading_engine, "TradingClient") as alpaca, \
+            pytest.raises(RuntimeError, match="Live trading blocked"):
+        bot._init_api()
+    alpaca.assert_not_called()
+
+
+def test_coinbase_short_does_not_charge_paper_fee(bot, monkeypatch):
+    monkeypatch.setattr(trading_engine.cfg, "PAPER_TRADING", True)
+    bot.balance_spot = bot.balance_futures = 1000
+    bot.risk_manager = MagicMock()
+    bot.risk_manager.can_trade.return_value = (True, "")
+    bot._rl_shadow_decision = MagicMock()
+    bot.execute_signals([SimpleNamespace(symbol="BTC/USD", direction="SHORT", confidence=0.9)])
+    assert bot.balance_spot == 1000
+    assert not bot.positions
+    bot._rl_shadow_decision.assert_not_called()
+    bot.coinbase_client.place_market_order.assert_not_called()

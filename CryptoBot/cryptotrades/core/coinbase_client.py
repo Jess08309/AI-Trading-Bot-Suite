@@ -188,8 +188,10 @@ class CoinbaseClient:
             logger.info("COINBASE PAPER: Would %s %s %s=%s", side, product_id, size_key, size)
             return {"paper": True, "intended_order": body}
         result = self._request("POST", "/orders", body=body)
-        if not result.get("success"):
+        if result.get("success") is False:
             raise CoinbaseOrderRejected("Coinbase rejected the market order")
+        if result.get("success") is not True:
+            raise RuntimeError("Coinbase returned an ambiguous order response")
         return result
 
     def get_order(self, order_id):

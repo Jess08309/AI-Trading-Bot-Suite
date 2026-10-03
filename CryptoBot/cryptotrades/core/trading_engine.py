@@ -1850,7 +1850,8 @@ class TradingBot:
                 "timestamp": datetime.now().isoformat(),
                 "engine_path": engine_path,
                 "engine_sha256": self._sha256_file(engine_path),
-                "config": asdict(cfg),
+                "config": {key: value for key, value in asdict(cfg).items()
+                           if key not in {"COINBASE_API_KEY", "COINBASE_API_SECRET"}},
                 "flags": {
                     "direction_bias": self.direction_bias,
                     "direction_bias_strength": self.direction_bias_strength,
@@ -2373,8 +2374,10 @@ class TradingBot:
             raise RuntimeError("Reconcile coinbase_pending_order.json before restarting or changing brokers")
         self.logger.info("Active spot broker: %s", self.spot_broker.upper())
         if self.spot_broker == "coinbase":
-            if not cfg.PAPER_TRADING and not cfg.DRY_RUN and os.getenv("LIVE_TRADING_CONFIRM") != "CONFIRM LIVE TRADING":
-                raise RuntimeError("Live trading blocked. Set LIVE_TRADING_CONFIRM='CONFIRM LIVE TRADING' to proceed.")
+            cfg.PAPER_TRADING = broker_config.PAPER_TRADING
+        if not cfg.PAPER_TRADING and not cfg.DRY_RUN and os.getenv("LIVE_TRADING_CONFIRM") != "CONFIRM LIVE TRADING":
+            raise RuntimeError("Live trading blocked. Set LIVE_TRADING_CONFIRM='CONFIRM LIVE TRADING' to proceed.")
+        if self.spot_broker == "coinbase":
             self.coinbase_client = CoinbaseClient(
                 broker_config.COINBASE_API_KEY, broker_config.COINBASE_API_SECRET,
                 paper_trading=cfg.PAPER_TRADING or cfg.DRY_RUN,
@@ -2934,8 +2937,11 @@ class TradingBot:
         """
         if getattr(self, "spot_broker", "alpaca") == "coinbase":
             try:
-                available, explicit = self._spot_available_qty(symbol)
-                return explicit and available is not None and available <= 0
+                currency = to_coinbase_symbol(symbol).split("-")[0]
+                accounts = self.coinbase_client.get_accounts()["accounts"]
+                holdings = [float(a["available_balance"]["value"]) + float(a["hold"]["value"])
+                            for a in accounts if a["currency"] == currency]
+                return all(quantity <= 0 for quantity in holdings)
             except Exception:
                 return False
         if not self.trading_client:
@@ -3904,6 +3910,8 @@ class TradingBot:
                         and available is not None
                         and available <= 0
                     )
+                    if broker_zero_confirmed and getattr(self, "spot_broker", "alpaca") == "coinbase":
+                        broker_zero_confirmed = self._confirm_zero_broker_qty(symbol)
                 except Exception:
                     broker_zero_confirmed = False
 
@@ -4653,6 +4661,10 @@ class TradingBot:
         futures_positions = sum(1 for symbol in self.positions if symbol.startswith("PI_"))
 
         for signal in signals:
+            if (not signal.symbol.startswith("PI_") and signal.direction != "LONG"
+                    and getattr(self, "spot_broker", "alpaca") == "coinbase"):
+                self.logger.info("SKIP OPEN %s %s: Coinbase spot does not support shorting", signal.direction, signal.symbol)
+                continue
             rl_decision = self._rl_shadow_decision(signal)
 
             is_futures = signal.symbol.startswith("PI_")
@@ -4969,9 +4981,6 @@ class TradingBot:
                     self.balance_spot -= fee
 
             # Real order on Alpaca — spot longs only (Alpaca has no crypto shorting/futures)
-            if not is_futures and signal.direction != "LONG" and getattr(self, "spot_broker", "alpaca") == "coinbase":
-                self.logger.info("SKIP OPEN %s %s: Coinbase spot does not support shorting", signal.direction, signal.symbol)
-                continue
             if not is_futures and signal.direction == "LONG":
                 position.spot_broker = getattr(self, "spot_broker", "alpaca")
                 position.broker_qty = self._buy_spot(signal.symbol, size)
