@@ -38,3 +38,44 @@ Paper trading only. No real capital is at risk. This is a research/track-record-
 ---
 
 **Disclaimer:** experimental software for educational/research purposes only. Not financial advice. Trading involves substantial risk of loss. Past/simulated performance does not guarantee future results.
+
+## Coinbase setup
+
+Coinbase Advanced Trade is an opt-in **spot** broker. Create a CDP API key at
+[coinbase.com/settings/api](https://coinbase.com/settings/api) with **View + Trade**
+permissions, **no Transfer** permission. IP-allowlist the bot server's fixed
+outbound IP. Install `CryptoBot/requirements.txt` (or
+`CryptoBot/cryptotrades/requirements.txt`) before enabling it.
+
+Set these variables in your existing private environment (never commit keys):
+
+```dotenv
+ENABLE_COINBASE=true
+COINBASE_API_KEY=organizations/YOUR_ORG/apiKeys/YOUR_KEY
+COINBASE_API_SECRET=<your CDP private key>
+PAPER_TRADING=true
+```
+
+P-256 PEM keys use ES256 JWTs; Ed25519 PEM or base64 CDP keys use EdDSA JWTs.
+For PEM values in dotenv, use a quoted multiline value or quoted `\n` escapes.
+Do not use legacy Coinbase Exchange HMAC credentials.
+
+When enabled with both credentials present, Coinbase is primary; otherwise the
+existing Alpaca behavior is retained. Startup logs name the active spot broker.
+Coinbase auth errors stop startup rather than silently moving exposure to Alpaca.
+`BTC/USD` maps to `BTC-USD` (likewise for the existing spot universe); Coinbase
+may not list every symbol, and unavailable products are not traded. Futures and
+backtest tools are unchanged.
+
+**Paper mode uses live read-only data/auth checks and logs intended orders; it
+never submits or cancels Coinbase orders.** Live mode additionally requires the
+bot's existing `LIVE_TRADING_CONFIRM` safeguard. Close tracked positions on their
+original broker before changing brokers, or close live Coinbase positions before
+switching to paper mode.
+Use separate paper/live state ledgers; restored Coinbase positions from the
+other mode are rejected, including simulated positions with zero broker quantity.
+
+An ambiguous live order stops the bot and leaves
+`cryptotrades/data/state/coinbase_pending_order.json`. Reconcile the recorded
+client order ID with Coinbase and the bot's position ledger before removing that
+marker and restarting; do not delete it blindly.
