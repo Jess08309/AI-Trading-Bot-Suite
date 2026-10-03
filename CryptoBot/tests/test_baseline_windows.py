@@ -1,4 +1,5 @@
 import csv
+import copy
 import json
 from types import SimpleNamespace
 
@@ -115,6 +116,11 @@ def test_cli_out_of_sample_gate(tmp_path, monkeypatch, strict, training_end, sho
     monkeypatch.setattr(baseline, "SPOT_DIR", str(spot))
     monkeypatch.setattr(baseline, "FUTURES_DIR", str(tmp_path / "absent"))
     monkeypatch.setattr(baseline.MarketPredictor, "load_model", lambda self: True)
+    strict_config = copy.copy(baseline.live_config)
+    strict_config.SIM_REALISM_PROFILE = "strict"
+    strict_config._apply_realism_profile()
+    for name, value in baseline.execution_settings(strict_config).items():
+        monkeypatch.setattr(baseline.live_config, name, value)
     monkeypatch.setattr(baseline.live_config, "SIM_REALISM_PROFILE", strict)
     calls = []
     monkeypatch.setattr(baseline, "run_full_backtest", lambda *a, **kw: calls.append(kw) or {})
@@ -125,6 +131,7 @@ def test_cli_out_of_sample_gate(tmp_path, monkeypatch, strict, training_end, sho
         baseline.main()
         report = json.loads(output.read_text())
         assert report["evaluation_type"] == "out_of_sample"
+        assert report["effective_strict_execution"]
         assert report["data_coverage"]["spot"]["BTC-USD"]["coverage_pct"] == 100
         assert calls[0]["price_data"]["BTC-USD"][0] == 61
     else:
@@ -133,6 +140,32 @@ def test_cli_out_of_sample_gate(tmp_path, monkeypatch, strict, training_end, sho
         assert error.value.code == 2
         assert calls == []
         assert not output.exists()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("ENABLE_EXECUTION_COSTS", False),
+    ("ENABLE_PARTIAL_FILLS", False),
+    ("ENABLE_FUNDING_COSTS", False),
+    ("SPOT_SLIPPAGE_BPS", 0),
+    ("FUTURES_SLIPPAGE_BPS", 0),
+    ("SPOT_FEE_RATE", 0),
+    ("FUTURES_FEE_RATE", 0),
+    ("PARTIAL_FILL_PROB", 0),
+    ("PARTIAL_FILL_MIN", 1),
+    ("PARTIAL_FILL_MAX", 1),
+    ("FUTURES_FUNDING_RATE_PER_8H", 0),
+    ("SPOT_SLIPPAGE_BPS", float("nan")),
+    ("FUTURES_FEE_RATE", float("inf")),
+])
+def test_strict_gate_rejects_weakened_or_invalid_overrides(monkeypatch, field, value):
+    strict_config = copy.copy(baseline.live_config)
+    strict_config.SIM_REALISM_PROFILE = "strict"
+    strict_config._apply_realism_profile()
+    monkeypatch.setattr(baseline, "live_config", strict_config)
+    assert baseline.strict_execution_enabled()
+    monkeypatch.setattr(strict_config, field, value)
+    assert not baseline.strict_execution_enabled()
+    assert getattr(strict_config, field) is value
 
 
 @pytest.mark.parametrize("args", [

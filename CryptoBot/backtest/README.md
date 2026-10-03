@@ -109,7 +109,8 @@ existing full-window behavior is preserved. `evaluation_type` is
 and supplied training metadata. Metadata must belong to the model passed;
 temporal separation does not establish model provenance or live fidelity.
 `--require-out-of-sample` rejects unknown/overlapping windows and non-strict
-profiles before simulation. Coverage is calculated even without a gap-repair
+effective settings (including weakened cost/fill/funding overrides) before
+simulation; the report records those effective settings. Coverage is calculated even without a gap-repair
 report; missing boundary coverage is measurable when both dates are supplied.
 
 `run_baseline.py` reports, per spot/futures symbol and in aggregate:

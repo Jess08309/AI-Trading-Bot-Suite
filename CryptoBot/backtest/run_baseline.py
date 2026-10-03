@@ -25,8 +25,10 @@ Usage:
     SIM_REALISM_PROFILE=strict python3 backtest/run_baseline.py --model data/models/market_model.joblib
 """
 import argparse
+import copy
 import csv
 import json
+import math
 import os
 import sys
 from collections import Counter, defaultdict
@@ -50,6 +52,34 @@ SPOT_DIR = os.path.join(BASE_DIR, "data", "historical", "1min")
 FUTURES_DIR = os.path.join(BASE_DIR, "data", "historical", "1min_futures")
 DEFAULT_MODEL_PATH = os.path.join(BASE_DIR, live_config.ML_MODEL_PATH)
 REPORT_PATH = os.path.join(BASE_DIR, "data", "state", "baseline_report.json")
+EXECUTION_FIELDS = (
+    "ENABLE_EXECUTION_COSTS", "SPOT_SLIPPAGE_BPS", "FUTURES_SLIPPAGE_BPS",
+    "SPOT_FEE_RATE", "FUTURES_FEE_RATE", "ENABLE_PARTIAL_FILLS",
+    "PARTIAL_FILL_PROB", "PARTIAL_FILL_MIN", "PARTIAL_FILL_MAX",
+    "ENABLE_FUNDING_COSTS", "FUTURES_FUNDING_RATE_PER_8H",
+)
+
+
+def execution_settings(config=None) -> dict:
+    if config is None:
+        config = live_config
+    return {name: getattr(config, name) for name in EXECUTION_FIELDS}
+
+
+def strict_execution_enabled() -> bool:
+    """Reject overrides weakening the profile, without mutating shared config."""
+    if live_config.SIM_REALISM_PROFILE != "strict":
+        return False
+    strict = copy.copy(live_config)
+    strict._apply_realism_profile()
+    settings = execution_settings()
+    numeric = [value for value in settings.values() if not isinstance(value, bool)]
+    return (
+        all(math.isfinite(value) and value >= 0 for value in numeric)
+        and 0 < live_config.PARTIAL_FILL_MIN <= live_config.PARTIAL_FILL_MAX <= 1
+        and 0 <= live_config.PARTIAL_FILL_PROB <= 1
+        and settings == execution_settings(strict)
+    )
 
 
 def parse_date(value: str) -> int:
@@ -295,10 +325,10 @@ def main():
     evaluation_type = classify_window(model_training_window, coverage)
     print(f"\nTraining-window leakage label: {evaluation_type}")
     if args.require_out_of_sample and (
-        evaluation_type != "out_of_sample" or live_config.SIM_REALISM_PROFILE != "strict"
+        evaluation_type != "out_of_sample" or not strict_execution_enabled()
     ):
         parser.error("--require-out-of-sample needs non-overlapping training metadata "
-                     "and SIM_REALISM_PROFILE=strict")
+                     "and effective strict execution settings (no weakened overrides)")
 
     print("\nRunning repository SpotBacktester/FuturesBacktester with MarketPredictor. "
           "This does not replay TradingBot's internal MLModel/cfg; see "
@@ -329,6 +359,8 @@ def main():
 
     report = {
         "sim_realism_profile": live_config.SIM_REALISM_PROFILE,
+        "execution_settings": execution_settings(),
+        "effective_strict_execution": strict_execution_enabled(),
         "model_path": args.model,
         "model_mtime": (
             datetime.fromtimestamp(model_mtime, tz=timezone.utc).isoformat() if model_mtime else None

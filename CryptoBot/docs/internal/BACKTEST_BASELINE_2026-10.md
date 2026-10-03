@@ -114,8 +114,10 @@ Reports include actual selected timestamps/coverage, temporal leakage label,
 per-symbol exit counts and pooled trade statistics. Worst-symbol drawdown
 and mean-symbol Sharpe are explicitly **not portfolio** statistics.
 
-`--require-out-of-sample` refuses unknown/overlapping training windows and
-non-strict profiles before simulation. Matching training metadata is required:
+`--require-out-of-sample` refuses unknown/overlapping training windows,
+non-strict profiles and overrides that weaken the effective strict settings
+before simulation. Effective cost/fill/funding settings and their strict
+status are saved in the report. Matching training metadata is required:
 metadata is a provenance assertion, not a cryptographic artifact check.
 Missing/malformed explicit metadata fails rather than quietly claiming OOS.
 These tests verify infrastructure correctness, **not a profitable strategy**.
@@ -202,10 +204,15 @@ Before changes: **169 passed, 11 failed**. The failures are all in
 Observed errors include missing `order_retry_manager`/`expectancy_tracker`
 on test-created bots and sell mocks expecting the older order flow. These
 unrelated tests and production paths were not altered to hide failures.
-New focused tests: **18 passed** (UTC/date boundaries, gaps, empty/short
+New focused tests: **31 passed** (UTC/date boundaries, gaps, empty/short
 windows, unknown/overlap labels, mixed futures/spot leakage, strict gate,
-aggregation and CLI rejection). After changes: **187 passed, the identical
+aggregation, weakened/non-finite realism overrides and CLI rejection).
+After changes: **200 passed, the identical
 11 failures**, no new failures; separate `cryptotrades/tests` invocation:
 **101 passed**. CLI help, missing-model exit 1 and invalid-window exit 2 were
-manually verified. `git diff --check` passed. Code/security review is performed
-before completing the PR; any unavailable scan will be disclosed.
+manually verified, including an actual `SIM_REALISM_PROFILE=strict
+ENABLE_EXECUTION_COSTS=false` environment override. `git diff --check` passed.
+CodeQL reported **zero Python alerts**. The automated review binary was
+unavailable; a separate read-only review identified the weakened-strict
+override gap, now fixed with regression tests. Validation is rerun after
+that fix before completing the PR.
