@@ -99,6 +99,9 @@ class TradingConfig:
     ENABLE_SPOT: bool = True          # spot trading/prices (Alpaca)
     ENABLE_FUTURES: bool = True       # futures trading/prices (Kraken)
     ENABLE_ALPACA: bool = True        # connect to Alpaca for spot data
+    ENABLE_COINBASE: bool = False
+    COINBASE_API_KEY: str = field(default="", repr=False)
+    COINBASE_API_SECRET: str = field(default="", repr=False)
     ENABLE_KRAKEN: bool = True        # connect to Kraken for futures data
 
     # ── Timing ────────────────────────────────────────────
@@ -252,6 +255,9 @@ class TradingConfig:
         self.ENABLE_SPOT = _env_bool("ENABLE_SPOT", self.ENABLE_SPOT)
         self.ENABLE_FUTURES = _env_bool("ENABLE_FUTURES", self.ENABLE_FUTURES)
         self.ENABLE_ALPACA = _env_bool("ENABLE_ALPACA", self.ENABLE_ALPACA)
+        self.ENABLE_COINBASE = _env_bool("ENABLE_COINBASE", self.ENABLE_COINBASE)
+        self.COINBASE_API_KEY = os.getenv("COINBASE_API_KEY", self.COINBASE_API_KEY).strip()
+        self.COINBASE_API_SECRET = os.getenv("COINBASE_API_SECRET", self.COINBASE_API_SECRET).strip()
         self.ENABLE_KRAKEN = _env_bool("ENABLE_KRAKEN", self.ENABLE_KRAKEN)
 
         self.CHECK_INTERVAL = _env_int("CHECK_INTERVAL", self.CHECK_INTERVAL)

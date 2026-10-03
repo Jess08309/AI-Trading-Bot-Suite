@@ -16,7 +16,7 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from dotenv import load_dotenv
 import requests
 import numpy as np
@@ -53,6 +53,7 @@ _WASH_TRADE_CANCEL_WAIT_SEC = 1.5
 
 # Real order execution for Kraken Futures (in-house signed REST client)
 from core.kraken_futures_client import KrakenFuturesClient
+from core.coinbase_client import CoinbaseClient, CoinbaseOrderRejected, select_spot_broker, to_coinbase_symbol
 
 # ============================================================
 # PRODUCTION CONFIGURATION - Centralized & Simplified
@@ -65,6 +66,9 @@ class TradingConfig:
     PAPER_TRADING: bool = True
     LIVE_TRADING_WARNING: bool = False
     DRY_RUN: bool = False
+    ENABLE_COINBASE: bool = False
+    COINBASE_API_KEY: str = field(default="", repr=False)
+    COINBASE_API_SECRET: str = field(default="", repr=False)
 
     # Capital — full portfolio consolidation (2026-09-27): PutSeller/CallBuyer/
     # AlpacaBot terminated, 100% of the shared paper account's trading capital
@@ -260,6 +264,11 @@ class TradingConfig:
                 return default
             return value.strip().lower() in {"1", "true", "yes", "on"}
 
+        self.PAPER_TRADING = _env_bool("PAPER_TRADING", self.PAPER_TRADING)
+        self.ENABLE_COINBASE = _env_bool("ENABLE_COINBASE", self.ENABLE_COINBASE)
+        self.COINBASE_API_KEY = os.getenv("COINBASE_API_KEY", self.COINBASE_API_KEY).strip()
+        self.COINBASE_API_SECRET = os.getenv("COINBASE_API_SECRET", self.COINBASE_API_SECRET).strip()
+
         def _env_int(name: str, current: int) -> int:
             value = os.getenv(name)
             if value is None:
@@ -454,6 +463,7 @@ class Position:
     ml_confidence: float = 0.0
     entry_reason: str = ""
     broker_qty: float = 0.0  # Real Alpaca fill qty, if a live spot order was placed
+    spot_broker: str = "alpaca"
     broker_zero_qty_confirmations: int = 0  # Consecutive broker-confirmed zero-available close attempts
     kraken_order_id: str = ""  # Real Kraken Futures order id, if a live futures order was placed
     close_retry_count: int = 0  # Consecutive failed/zero-fill close attempts, persisted across restarts
@@ -1638,6 +1648,7 @@ class TradingBot:
 
         # Load history if exists
         self._load_state()
+        self._validate_spot_broker_positions()
 
         # Trim stacked positions to enforce new per-symbol limits
         self._trim_stacked_positions()
@@ -2344,7 +2355,36 @@ class TradingBot:
             self.logger.warning(f"ML challenger shadow report save failed: {e}")
 
     def _init_api(self):
-        """Initialize Alpaca crypto API session."""
+        """Select the spot broker; retain Alpaca as the default fallback."""
+        broker_config = TradingConfig()
+        self.spot_broker = select_spot_broker(
+            broker_config.ENABLE_COINBASE,
+            broker_config.COINBASE_API_KEY,
+            broker_config.COINBASE_API_SECRET,
+        )
+        self.coinbase_client = None
+        self._coinbase_order_resolved = False
+        self.trading_client = None
+        self._coinbase_pending_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data", "state", "coinbase_pending_order.json",
+        )
+        if os.path.exists(self._coinbase_pending_path):
+            raise RuntimeError("Reconcile coinbase_pending_order.json before restarting or changing brokers")
+        self.logger.info("Active spot broker: %s", self.spot_broker.upper())
+        if self.spot_broker == "coinbase":
+            if not cfg.PAPER_TRADING and not cfg.DRY_RUN and os.getenv("LIVE_TRADING_CONFIRM") != "CONFIRM LIVE TRADING":
+                raise RuntimeError("Live trading blocked. Set LIVE_TRADING_CONFIRM='CONFIRM LIVE TRADING' to proceed.")
+            self.coinbase_client = CoinbaseClient(
+                broker_config.COINBASE_API_KEY, broker_config.COINBASE_API_SECRET,
+                paper_trading=cfg.PAPER_TRADING or cfg.DRY_RUN,
+            )
+            # Reads are live even in paper mode. Never switch exchanges on an
+            # auth/transport failure: existing positions belong to this broker.
+            self.coinbase_client.get_accounts()
+            self.logger.info("Coinbase Advanced Trade connected (%s)", "PAPER" if cfg.PAPER_TRADING else "LIVE")
+            self._init_kraken_futures()
+            return
         api_key = os.getenv("ALPACA_API_KEY")
         api_secret = os.getenv("ALPACA_API_SECRET")
         self.trading_client = None
@@ -2391,6 +2431,94 @@ class TradingBot:
             self.logger.warning("alpaca-py trading SDK not available — spot orders will be simulated only")
 
         self._init_kraken_futures()
+
+    def _validate_spot_broker_positions(self):
+        for position in self.positions.values():
+            if position.broker_qty > 0 and position.spot_broker != self.spot_broker:
+                raise RuntimeError("Close existing broker positions before switching spot brokers")
+            if position.broker_qty > 0 and self.spot_broker == "coinbase" and cfg.PAPER_TRADING:
+                raise RuntimeError("Close live Coinbase positions before switching to paper mode")
+
+    def _spot_available_qty(self, symbol: str) -> Tuple[Optional[float], bool]:
+        if getattr(self, "spot_broker", "alpaca") != "coinbase":
+            return self._alpaca_spot_available_qty(symbol)
+        currency = to_coinbase_symbol(symbol).split("-")[0]
+        accounts = self.coinbase_client.get_accounts()["accounts"]
+        balances = [float(a["available_balance"]["value"]) for a in accounts
+                    if a["currency"] == currency]
+        return sum(balances), True
+
+    def _coinbase_order_spot(self, symbol: str, side: str, size: float) -> float:
+        from decimal import Decimal, ROUND_DOWN
+        from utils.execution_guard import passes_spread_gate
+
+        if cfg.PAPER_TRADING or cfg.DRY_RUN:
+            self.logger.info("COINBASE PAPER: Would %s %s size=%s", side, symbol, size)
+            return 0.0
+        quote = self._fetch_spot_quote(symbol)
+        if not quote or not passes_spread_gate(*quote, max_spread_bps=cfg.MAX_SPREAD_BPS)[0]:
+            return 0.0
+        product = self.coinbase_client.get_product(symbol)
+        if product.get("trading_disabled") or product.get("cancel_only") or product.get("limit_only"):
+            return 0.0
+        if side == "SELL":
+            available, _ = self._spot_available_qty(symbol)
+            size = min(size, available)
+        prefix = "quote" if side == "BUY" else "base"
+        increment = Decimal(product[prefix + "_increment"])
+        amount = (Decimal(str(size)) / increment).to_integral_value(rounding=ROUND_DOWN) * increment
+        if amount <= 0 or amount < Decimal(product[prefix + "_min_size"]):
+            return 0.0
+        import uuid
+        client_order_id = str(uuid.uuid4())
+        os.makedirs(os.path.dirname(self._coinbase_pending_path), exist_ok=True)
+        # A durable latch stops automatic restarts from duplicating an order
+        # after a lost response or a crash during fill confirmation.
+        with open(self._coinbase_pending_path, "x") as pending:
+            json.dump({"client_order_id": client_order_id, "symbol": symbol, "side": side}, pending)
+        order_id = client_order_id
+        # Do not count acceptance as a fill, or return zero on an ambiguous
+        # accepted order and allow a later cycle to duplicate it.
+        try:
+            result = self.coinbase_client.place_market_order(
+                symbol, side, **{prefix + "_size": str(amount)}, client_order_id=client_order_id,
+            )
+            order_id = result["success_response"]["order_id"]
+            for _ in range(6):
+                order = self.coinbase_client.get_order(order_id)["order"]
+                if order["status"] in {"FILLED", "CANCELLED", "EXPIRED", "FAILED"}:
+                    filled = float(order["filled_size"])
+                    if filled > 0:
+                        self._coinbase_order_resolved = True
+                    else:
+                        os.remove(self._coinbase_pending_path)
+                    return filled
+                time.sleep(2)
+            self.coinbase_client.cancel_orders([order_id])
+            order = self.coinbase_client.get_order(order_id)["order"]
+            if order["status"] in {"FILLED", "CANCELLED", "EXPIRED", "FAILED"}:
+                filled = float(order["filled_size"])
+                if filled > 0:
+                    self._coinbase_order_resolved = True
+                else:
+                    os.remove(self._coinbase_pending_path)
+                return filled
+        except CoinbaseOrderRejected:
+            os.remove(self._coinbase_pending_path)
+            return 0.0
+        except Exception:
+            pass
+        raise SystemExit(f"Coinbase order {order_id} unresolved; reconcile it before restarting")
+
+    def _buy_spot(self, symbol: str, notional: float) -> float:
+        if getattr(self, "spot_broker", "alpaca") == "coinbase":
+            return self._coinbase_order_spot(symbol, "BUY", notional)
+        return self._alpaca_buy_spot(symbol, notional)
+
+    def _sell_spot(self, symbol: str, qty: float) -> float:
+        if getattr(self, "spot_broker", "alpaca") == "coinbase":
+            return self._coinbase_order_spot(symbol, "SELL", qty)
+        return self._alpaca_sell_spot(symbol, qty)
 
     def _init_kraken_futures(self):
         """Initialize Kraken Futures order-execution client. Read-only auth check only —
@@ -2467,6 +2595,10 @@ class TradingBot:
     def _fetch_spot_quote(self, symbol: str) -> Optional[Tuple[float, float]]:
         """Fetch the latest (bid, ask) for an Alpaca crypto spot symbol."""
         try:
+            if getattr(self, "spot_broker", "alpaca") == "coinbase":
+                books = self.coinbase_client.get_best_bid_ask([symbol])["pricebooks"]
+                book = next(b for b in books if b["product_id"] == to_coinbase_symbol(symbol))
+                return float(book["bids"][0]["price"]), float(book["asks"][0]["price"])
             url = f"{ALPACA_DATA_URL}/latest/quotes?symbols={symbol}"
             headers = {}
             if self._alpaca_session:
@@ -2800,6 +2932,12 @@ class TradingBot:
         error, so a network blip can never be misread as "safe to delete".
         This never places an order or otherwise touches broker state.
         """
+        if getattr(self, "spot_broker", "alpaca") == "coinbase":
+            try:
+                available, explicit = self._spot_available_qty(symbol)
+                return explicit and available is not None and available <= 0
+            except Exception:
+                return False
         if not self.trading_client:
             return False
         try:
@@ -3088,6 +3226,9 @@ class TradingBot:
                 os.path.join(_state, "positions.json"),
                 {k: asdict(v) for k, v in self.positions.items()}
             )
+            if getattr(self, "_coinbase_order_resolved", False):
+                os.remove(self._coinbase_pending_path)
+                self._coinbase_order_resolved = False
 
             # Persist paper balances so dashboards/monitors can read them
             _atomic_write(os.path.join(_state, "paper_balances.json"), {
@@ -3132,6 +3273,8 @@ class TradingBot:
     def _fetch_public_spot_price(self, symbol: str) -> Optional[float]:
         """Fetch spot price using Alpaca crypto data endpoint."""
         try:
+            if getattr(self, "spot_broker", "alpaca") == "coinbase":
+                return float(self.coinbase_client.get_product(symbol)["price"])
             url = f"{ALPACA_DATA_URL}/latest/trades?symbols={symbol}"
             headers = {}
             if self._alpaca_session:
@@ -3187,6 +3330,11 @@ class TradingBot:
     def _fetch_spot_depth_usd(self, symbol: str) -> Optional[float]:
         """Fetch Alpaca crypto orderbook depth in USD."""
         try:
+            if getattr(self, "spot_broker", "alpaca") == "coinbase":
+                book = self.coinbase_client.get_product_book(symbol, cfg.ORDERBOOK_LEVELS)["pricebook"]
+                bids = sum(float(l["price"]) * float(l["size"]) for l in book["bids"])
+                asks = sum(float(l["price"]) * float(l["size"]) for l in book["asks"])
+                return min(bids, asks) if bids > 0 and asks > 0 else None
             url = f"{ALPACA_DATA_URL}/orderbooks/books?symbols={symbol}"
             headers = {}
             if self._alpaca_session:
@@ -3558,7 +3706,7 @@ class TradingBot:
         symbols = list(self._dynamic_spot_symbols)
 
         # Use concurrent fetcher if available (10× faster for 100+ symbols)
-        if self._concurrent_fetcher and len(symbols) > 5:
+        if self._concurrent_fetcher and len(symbols) > 5 and getattr(self, "spot_broker", "alpaca") != "coinbase":
             prices = self._concurrent_fetcher.fetch_all_spot(
                 symbols=symbols,
                 client=self.client,
@@ -3738,17 +3886,19 @@ class TradingBot:
 
         is_futures = symbol.startswith("PI_")
         fill_price = self._apply_slippage(price, position.direction, is_entry=False, is_futures=is_futures)
+        if not is_futures and getattr(self, "spot_broker", "alpaca") == "coinbase" and cfg.PAPER_TRADING:
+            self.logger.info("COINBASE PAPER: Would SELL %s size=%s", symbol, position.size / position.entry_price)
 
         # Close the matching real Alpaca order, if one was opened. Check the
         # CONFIRMED sold qty before deleting any state — a silently-ignored
         # failed/partial sell is exactly what created the AAVE/PEPE/UNI orphans.
         if position.broker_qty > 0:
             tracked_broker_qty = position.broker_qty
-            sold_qty = self._alpaca_sell_spot(symbol, tracked_broker_qty)
+            sold_qty = self._sell_spot(symbol, tracked_broker_qty)
             if sold_qty <= 0:
                 broker_zero_confirmed = False
                 try:
-                    available, explicit_available = self._alpaca_spot_available_qty(symbol)
+                    available, explicit_available = self._spot_available_qty(symbol)
                     broker_zero_confirmed = bool(
                         explicit_available
                         and available is not None
@@ -4819,9 +4969,14 @@ class TradingBot:
                     self.balance_spot -= fee
 
             # Real order on Alpaca — spot longs only (Alpaca has no crypto shorting/futures)
+            if not is_futures and signal.direction != "LONG" and getattr(self, "spot_broker", "alpaca") == "coinbase":
+                self.logger.info("SKIP OPEN %s %s: Coinbase spot does not support shorting", signal.direction, signal.symbol)
+                continue
             if not is_futures and signal.direction == "LONG":
-                position.broker_qty = self._alpaca_buy_spot(signal.symbol, size)
-                if position.broker_qty <= 0:
+                position.spot_broker = getattr(self, "spot_broker", "alpaca")
+                position.broker_qty = self._buy_spot(signal.symbol, size)
+                coinbase_paper = position.spot_broker == "coinbase" and cfg.PAPER_TRADING
+                if position.broker_qty <= 0 and not coinbase_paper:
                     self.logger.warning(
                         f"SKIP OPEN {signal.direction} {signal.symbol}: Alpaca buy did not "
                         f"confirm a fill — not tracking a phantom position"
