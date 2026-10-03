@@ -1,9 +1,9 @@
 """
 CryptoBot backtest driver: short-vs-long baseline over real historical data.
 
-Runs the LIVE backtest engine (cryptotrades/utils/backtester.py's
-SpotBacktester / FuturesBacktester / run_full_backtest, driven by the same
-MarketPredictor and live config the production TradingBot uses) against:
+Runs the repository backtest engine (cryptotrades/utils/backtester.py's
+SpotBacktester / FuturesBacktester / run_full_backtest, driven by
+MarketPredictor and utils.config, NOT TradingBot's internal MLModel/cfg) against:
   - Spot 1-min candles downloaded by tools/download_6mo_candles.py
     (data/historical/1min/)
   - Futures 1-min candles downloaded by tools/download_kraken_futures_ohlc.py
@@ -25,11 +25,13 @@ Usage:
     SIM_REALISM_PROFILE=strict python3 backtest/run_baseline.py --model data/models/market_model.joblib
 """
 import argparse
+import copy
 import csv
 import json
+import math
 import os
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Dict, List
 
@@ -50,20 +52,82 @@ SPOT_DIR = os.path.join(BASE_DIR, "data", "historical", "1min")
 FUTURES_DIR = os.path.join(BASE_DIR, "data", "historical", "1min_futures")
 DEFAULT_MODEL_PATH = os.path.join(BASE_DIR, live_config.ML_MODEL_PATH)
 REPORT_PATH = os.path.join(BASE_DIR, "data", "state", "baseline_report.json")
+EXECUTION_FIELDS = (
+    "ENABLE_EXECUTION_COSTS", "SPOT_SLIPPAGE_BPS", "FUTURES_SLIPPAGE_BPS",
+    "SPOT_FEE_RATE", "FUTURES_FEE_RATE", "ENABLE_PARTIAL_FILLS",
+    "PARTIAL_FILL_PROB", "PARTIAL_FILL_MIN", "PARTIAL_FILL_MAX",
+    "ENABLE_FUNDING_COSTS", "FUTURES_FUNDING_RATE_PER_8H",
+)
 
 
-def load_csv_prices(csv_path: str) -> List[float]:
+def execution_settings(config=None) -> dict:
+    if config is None:
+        config = live_config
+    return {name: getattr(config, name) for name in EXECUTION_FIELDS}
+
+
+def strict_execution_enabled() -> bool:
+    """Reject overrides weakening the profile, without mutating shared config."""
+    if live_config.SIM_REALISM_PROFILE != "strict":
+        return False
+    strict = copy.copy(live_config)
+    strict._apply_realism_profile()
+    settings = execution_settings()
+    numeric = [value for value in settings.values() if not isinstance(value, bool)]
+    return (
+        all(math.isfinite(value) and value >= 0 for value in numeric)
+        and 0 < live_config.PARTIAL_FILL_MIN <= live_config.PARTIAL_FILL_MAX <= 1
+        and 0 <= live_config.PARTIAL_FILL_PROB <= 1
+        and settings == execution_settings(strict)
+    )
+
+
+def parse_date(value: str) -> int:
+    """Parse an ISO date/time; timestamps without an offset are UTC."""
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def load_csv_prices(csv_path: str, start_ts=None, end_ts=None, coverage=None) -> List[float]:
     """Load the 'close' column from a downloader-produced CSV, oldest first."""
     closes = []
     with open(csv_path, "r") as f:
         reader = csv.DictReader(f)
         rows = sorted(reader, key=lambda r: int(r["timestamp"]))
+        timestamps = []
         for row in rows:
+            ts = int(row["timestamp"])
+            if start_ts is not None and ts < start_ts:
+                continue
+            if end_ts is not None and ts >= end_ts:
+                continue
+            timestamps.append(ts)
             closes.append(float(row["close"]))
+    if coverage is not None:
+        unique = sorted(set(timestamps))
+        first = unique[0] if unique else None
+        last = unique[-1] if unique else None
+        lower = start_ts if start_ts is not None else first
+        upper = end_ts if end_ts is not None else (last + 60 if last is not None else None)
+        expected = max(0, (upper - lower + 59) // 60) if lower is not None and upper is not None else 0
+        coverage.update({
+            "start_timestamp": first,
+            "end_timestamp": last,
+            "rows": len(timestamps),
+            "unique_minutes": len(unique),
+            "expected_minutes": expected,
+            "coverage_pct": 100.0 * len(unique) / expected if expected else None,
+            "largest_gap_minutes": max(
+                ((b - a) / 60 for a, b in zip(unique, unique[1:])), default=0
+            ),
+        })
     return closes
 
 
-def load_price_dir(directory: str, suffix: str = "_1min.csv") -> Dict[str, List[float]]:
+def load_price_dir(directory: str, suffix: str = "_1min.csv",
+                   start_ts=None, end_ts=None, coverage=None) -> Dict[str, List[float]]:
     """Load all per-symbol CSVs in a directory into {symbol: [closes]}."""
     data = {}
     if not os.path.isdir(directory):
@@ -74,13 +138,64 @@ def load_price_dir(directory: str, suffix: str = "_1min.csv") -> Dict[str, List[
             continue
         symbol = fname[: -len(suffix)]
         path = os.path.join(directory, fname)
-        prices = load_csv_prices(path)
+        symbol_coverage = {}
+        prices = load_csv_prices(path, start_ts, end_ts, symbol_coverage)
+        if coverage is not None:
+            coverage[symbol] = symbol_coverage
         if len(prices) < 200:
             print(f"  {symbol}: only {len(prices)} candles, skipping (need >= 200)")
             continue
         data[symbol] = prices
         print(f"  {symbol}: loaded {len(prices):,} candles")
     return data
+
+
+def classify_window(model_meta, coverage) -> str:
+    """Label temporal separation conservatively, never infer unknown training dates."""
+    if not model_meta or not model_meta.get("actual_data_end"):
+        return "unknown"
+    training_end = parse_date(model_meta["actual_data_end"])
+    training_start = model_meta.get("actual_data_start")
+    windows = [
+        item for side in coverage.values() for item in side.values()
+        if item["rows"] >= 200 and item["start_timestamp"] is not None
+    ]
+    if not windows:
+        return "unknown"
+    if all(item["start_timestamp"] > training_end for item in windows):
+        return "out_of_sample"
+    if training_start is None:
+        return "unknown"
+    training_start = parse_date(training_start)
+    if any(item["start_timestamp"] <= training_end and
+           item["end_timestamp"] >= training_start for item in windows):
+        return "in_sample"
+    return "unknown"
+
+
+def aggregate_stats(results) -> dict:
+    """Pool closed trades, not independent symbol equity curves."""
+    results = list(results)
+    trades = [trade for result in results for trade in result.trades]
+    gross_profit = sum(max(0, trade.pnl_usd) for trade in trades)
+    gross_loss = sum(max(0, -trade.pnl_usd) for trade in trades)
+    return {
+        "num_trades": len(trades),
+        "win_rate": sum(trade.pnl_usd > 0 for trade in trades) / len(trades) if trades else 0.0,
+        "total_return_usd": sum(result.total_return_usd for result in results),
+        "profit_factor": gross_profit / gross_loss if gross_loss else (
+            float("inf") if gross_profit else 0.0
+        ),
+        "worst_symbol_max_drawdown_pct": max(
+            (result.max_drawdown_pct for result in results), default=0.0
+        ),
+        "mean_symbol_sharpe_ratio": (
+            sum(result.sharpe_ratio for result in results) / len(results) if results else 0.0
+        ),
+        "exit_reasons": dict(Counter(trade.exit_reason for trade in trades)),
+        "equity_metrics_note": "Independent symbol accounts: worst-symbol drawdown and "
+                              "mean-symbol Sharpe are NOT portfolio drawdown or Sharpe.",
+    }
 
 
 def load_coverage(directory: str) -> Dict[str, dict]:
@@ -166,7 +281,21 @@ def main():
                          help="Path to a tools/retrain_on_6mo.py --meta-output JSON describing this "
                               "model's training window. Omit for models with no known/recorded training "
                               "window (e.g. the live continuously-retrained artifact).")
+    parser.add_argument("--start-date", type=parse_date, default=None,
+                        help="Inclusive test-window ISO timestamp (naive dates use UTC)")
+    parser.add_argument("--end-date", type=parse_date, default=None,
+                        help="Exclusive test-window ISO timestamp (naive dates use UTC)")
+    parser.add_argument("--require-out-of-sample", action="store_true",
+                        help="Refuse to run unless metadata proves a later test window and strict realism")
     args = parser.parse_args()
+    if args.candle_size <= 0:
+        parser.error("--candle-size must be positive")
+    if args.start_date is not None and args.end_date is not None and args.start_date >= args.end_date:
+        parser.error("--start-date must be before --end-date")
+    model_training_window = None
+    if args.model_meta:
+        with open(args.model_meta, "r") as f:
+            model_training_window = json.load(f)
 
     print(f"SIM_REALISM_PROFILE = {live_config.SIM_REALISM_PROFILE}")
     print(live_config.summary())
@@ -180,18 +309,30 @@ def main():
     print(f"\nLoaded model from {args.model}")
 
     print(f"\nLoading spot candles from {SPOT_DIR} ...")
-    spot_data = load_price_dir(SPOT_DIR)
+    coverage = {"spot": {}, "futures": {}}
+    spot_data = load_price_dir(SPOT_DIR, start_ts=args.start_date, end_ts=args.end_date,
+                               coverage=coverage["spot"])
 
     print(f"\nLoading futures candles from {FUTURES_DIR} ...")
-    futures_data = load_price_dir(FUTURES_DIR)
+    futures_data = load_price_dir(FUTURES_DIR, start_ts=args.start_date, end_ts=args.end_date,
+                                  coverage=coverage["futures"])
 
     if not spot_data and not futures_data:
         print("\nERROR: no historical data found. Run tools/download_6mo_candles.py "
               "and tools/download_kraken_futures_ohlc.py first.")
         sys.exit(1)
 
-    print("\nRunning backtest (this uses the live SpotBacktester/FuturesBacktester "
-          "engine and live config, not a hand-duplicated copy)...")
+    evaluation_type = classify_window(model_training_window, coverage)
+    print(f"\nTraining-window leakage label: {evaluation_type}")
+    if args.require_out_of_sample and (
+        evaluation_type != "out_of_sample" or not strict_execution_enabled()
+    ):
+        parser.error("--require-out-of-sample needs non-overlapping training metadata "
+                     "and effective strict execution settings (no weakened overrides)")
+
+    print("\nRunning repository SpotBacktester/FuturesBacktester with MarketPredictor. "
+          "This does not replay TradingBot's internal MLModel/cfg; see "
+          "docs/internal/BACKTEST_BASELINE_2026-10.md.")
     results = run_full_backtest(
         predictor,
         price_data=spot_data,
@@ -211,32 +352,32 @@ def main():
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     model_mtime = os.path.getmtime(args.model) if os.path.exists(args.model) else None
 
-    model_training_window = None
-    if args.model_meta and os.path.exists(args.model_meta):
-        with open(args.model_meta, "r") as f:
-            model_training_window = json.load(f)
     model_training_window_note = (
         None if model_training_window else
-        "No --model-meta supplied: training window for this model artifact is unknown/undocumented "
-        "(e.g. the live bot's continuously-retrained trading_model.joblib, which retrains on a rolling "
-        "~28h in-memory price buffer every MODEL_RETRAIN_HOURS -- see PR writeup for leakage discussion)."
+        "No --model-meta supplied: training window is unknown. This run is not out-of-sample evidence."
     )
-
-    coverage = {
-        "spot": load_coverage(SPOT_DIR),
-        "futures": load_coverage(FUTURES_DIR),
-    }
 
     report = {
         "sim_realism_profile": live_config.SIM_REALISM_PROFILE,
+        "execution_settings": execution_settings(),
+        "effective_strict_execution": strict_execution_enabled(),
         "model_path": args.model,
         "model_mtime": (
             datetime.fromtimestamp(model_mtime, tz=timezone.utc).isoformat() if model_mtime else None
         ),
         "model_training_window": model_training_window,
         "model_training_window_note": model_training_window_note,
+        "evaluation_type": evaluation_type,
+        "strategy_scope": "utils.backtester + MarketPredictor; not core.TradingBot",
+        "test_window": {"start_inclusive": args.start_date, "end_exclusive": args.end_date},
         "data_coverage": coverage,
+        "gap_repair_coverage": {"spot": load_coverage(SPOT_DIR), "futures": load_coverage(FUTURES_DIR)},
         "candle_size": args.candle_size,
+        "aggregate": {
+            "all": aggregate_stats(results.values()),
+            "spot": aggregate_stats(r for r in results.values() if r.side == "spot"),
+            "futures": aggregate_stats(r for r in results.values() if r.side == "futures"),
+        },
         "per_symbol": {
             key: {
                 "side": r.side,
@@ -247,6 +388,7 @@ def main():
                 "max_drawdown_pct": r.max_drawdown_pct,
                 "sharpe_ratio": r.sharpe_ratio,
                 "profit_factor": r.profit_factor,
+                "exit_reasons": dict(Counter(t.exit_reason for t in r.trades)),
             }
             for key, r in results.items()
         },
