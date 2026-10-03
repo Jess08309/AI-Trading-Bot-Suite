@@ -72,6 +72,8 @@ never submits or cancels Coinbase orders.** Live mode additionally requires the
 bot's existing `LIVE_TRADING_CONFIRM` safeguard. Close tracked positions on their
 original broker before changing brokers, or close live Coinbase positions before
 switching to paper mode.
+Use separate paper/live state ledgers; restored Coinbase positions from the
+other mode are rejected, including simulated positions with zero broker quantity.
 
 An ambiguous live order stops the bot and leaves
 `cryptotrades/data/state/coinbase_pending_order.json`. Reconcile the recorded

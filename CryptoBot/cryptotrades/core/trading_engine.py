@@ -464,6 +464,7 @@ class Position:
     entry_reason: str = ""
     broker_qty: float = 0.0  # Real Alpaca fill qty, if a live spot order was placed
     spot_broker: str = "alpaca"
+    spot_paper: bool = True
     broker_zero_qty_confirmations: int = 0  # Consecutive broker-confirmed zero-available close attempts
     kraken_order_id: str = ""  # Real Kraken Futures order id, if a live futures order was placed
     close_retry_count: int = 0  # Consecutive failed/zero-fill close attempts, persisted across restarts
@@ -2375,7 +2376,7 @@ class TradingBot:
         self.logger.info("Active spot broker: %s", self.spot_broker.upper())
         if self.spot_broker == "coinbase":
             cfg.PAPER_TRADING = broker_config.PAPER_TRADING
-        if not cfg.PAPER_TRADING and not cfg.DRY_RUN and os.getenv("LIVE_TRADING_CONFIRM") != "CONFIRM LIVE TRADING":
+        if not cfg.PAPER_TRADING and os.getenv("LIVE_TRADING_CONFIRM") != "CONFIRM LIVE TRADING":
             raise RuntimeError("Live trading blocked. Set LIVE_TRADING_CONFIRM='CONFIRM LIVE TRADING' to proceed.")
         if self.spot_broker == "coinbase":
             self.coinbase_client = CoinbaseClient(
@@ -2437,6 +2438,8 @@ class TradingBot:
 
     def _validate_spot_broker_positions(self):
         for position in self.positions.values():
+            if position.spot_broker == "coinbase" and position.spot_paper != cfg.PAPER_TRADING:
+                raise RuntimeError("Use a separate Coinbase position ledger when switching paper/live modes")
             if position.broker_qty > 0 and position.spot_broker != self.spot_broker:
                 raise RuntimeError("Close existing broker positions before switching spot brokers")
             if position.broker_qty > 0 and self.spot_broker == "coinbase" and cfg.PAPER_TRADING:
@@ -2514,11 +2517,17 @@ class TradingBot:
         raise SystemExit(f"Coinbase order {order_id} unresolved; reconcile it before restarting")
 
     def _buy_spot(self, symbol: str, notional: float) -> float:
+        if cfg.DRY_RUN:
+            self.logger.info("DRY RUN: Would BUY %s notional=%s", symbol, notional)
+            return 0.0
         if getattr(self, "spot_broker", "alpaca") == "coinbase":
             return self._coinbase_order_spot(symbol, "BUY", notional)
         return self._alpaca_buy_spot(symbol, notional)
 
     def _sell_spot(self, symbol: str, qty: float) -> float:
+        if cfg.DRY_RUN:
+            self.logger.info("DRY RUN: Would SELL %s qty=%s", symbol, qty)
+            return 0.0
         if getattr(self, "spot_broker", "alpaca") == "coinbase":
             return self._coinbase_order_spot(symbol, "SELL", qty)
         return self._alpaca_sell_spot(symbol, qty)
@@ -4983,6 +4992,7 @@ class TradingBot:
             # Real order on Alpaca — spot longs only (Alpaca has no crypto shorting/futures)
             if not is_futures and signal.direction == "LONG":
                 position.spot_broker = getattr(self, "spot_broker", "alpaca")
+                position.spot_paper = cfg.PAPER_TRADING
                 position.broker_qty = self._buy_spot(signal.symbol, size)
                 coinbase_paper = position.spot_broker == "coinbase" and cfg.PAPER_TRADING
                 if position.broker_qty <= 0 and not coinbase_paper:

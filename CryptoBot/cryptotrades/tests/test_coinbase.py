@@ -527,3 +527,38 @@ def test_coinbase_short_does_not_charge_paper_fee(bot, monkeypatch):
     assert not bot.positions
     bot._rl_shadow_decision.assert_not_called()
     bot.coinbase_client.place_market_order.assert_not_called()
+
+
+@pytest.mark.parametrize("paper", [True, False])
+def test_coinbase_restored_positions_require_matching_mode(bot, monkeypatch, paper):
+    monkeypatch.setattr(trading_engine.cfg, "PAPER_TRADING", not paper)
+    bot.positions = {"BTC/USD": SimpleNamespace(
+        broker_qty=0 if paper else 1, spot_broker="coinbase", spot_paper=paper,
+    )}
+    with pytest.raises(RuntimeError, match="separate Coinbase position ledger"):
+        bot._validate_spot_broker_positions()
+
+
+def test_dry_run_cannot_bypass_live_confirmation(bot, monkeypatch):
+    monkeypatch.setenv("ENABLE_COINBASE", "false")
+    monkeypatch.delenv("LIVE_TRADING_CONFIRM", raising=False)
+    monkeypatch.setattr(trading_engine.cfg, "PAPER_TRADING", False)
+    monkeypatch.setattr(trading_engine.cfg, "DRY_RUN", True)
+    with patch.object(trading_engine, "TradingClient") as alpaca, \
+            pytest.raises(RuntimeError, match="Live trading blocked"):
+        bot._init_api()
+    alpaca.assert_not_called()
+
+
+@pytest.mark.parametrize("broker", ["alpaca", "coinbase"])
+def test_dry_run_execution_boundaries_never_place_orders(bot, monkeypatch, broker):
+    monkeypatch.setattr(trading_engine.cfg, "DRY_RUN", True)
+    monkeypatch.setattr(trading_engine.cfg, "PAPER_TRADING", False)
+    bot.spot_broker = broker
+    bot._alpaca_buy_spot = MagicMock()
+    bot._alpaca_sell_spot = MagicMock()
+    assert bot._buy_spot("BTC/USD", 100) == 0
+    assert bot._sell_spot("BTC/USD", 1) == 0
+    bot._alpaca_buy_spot.assert_not_called()
+    bot._alpaca_sell_spot.assert_not_called()
+    bot.coinbase_client.place_market_order.assert_not_called()
