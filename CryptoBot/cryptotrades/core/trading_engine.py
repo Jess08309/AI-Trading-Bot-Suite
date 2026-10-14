@@ -458,6 +458,7 @@ class Position:
     kraken_order_id: str = ""  # Real Kraken Futures order id, if a live futures order was placed
     close_retry_count: int = 0  # Consecutive failed/zero-fill close attempts, persisted across restarts
     close_retry_first_at: Optional[datetime] = None  # When the current retry streak began
+    entry_mid_price: float = 0.0  # Mid quote captured at entry, for journal slippage
 
 
 @dataclass
@@ -3863,14 +3864,12 @@ class TradingBot:
         # Structured trade journal (CSV + SQLite)
         try:
             from utils.trade_journal import TradeJournalEntry
-            mid_price_at_fill = fill_price
-            quote = self._fetch_spot_quote(symbol) if not is_futures else None
-            if quote:
-                mid_price_at_fill = (quote[0] + quote[1]) / 2.0
+            # Slippage is measured at entry: entry fill vs. the entry-time mid.
+            mid_price_at_fill = position.entry_mid_price or position.entry_price
             self.trade_journal.record(TradeJournalEntry(
                 symbol=symbol,
                 signal=position.entry_reason,
-                side="sell" if position.direction == "LONG" else "buy",
+                side="buy" if position.direction == "LONG" else "sell",
                 entry_price=position.entry_price,
                 exit_price=fill_price,
                 mid_price_at_fill=mid_price_at_fill,
@@ -4789,9 +4788,19 @@ class TradingBot:
             except Exception as e:
                 self.logger.debug(f"Risk-capped sizing failed for {signal.symbol}: {e}")
 
+            entry_mid_price = price
+            if not is_futures:
+                try:
+                    entry_quote = self._fetch_spot_quote(signal.symbol)
+                    if entry_quote:
+                        entry_mid_price = (entry_quote[0] + entry_quote[1]) / 2.0
+                except Exception:
+                    pass
+
             # Create position
             position = Position(
                 symbol=signal.symbol,
+                entry_mid_price=entry_mid_price,
                 direction=signal.direction,
                 entry_price=price,
                 size=size,

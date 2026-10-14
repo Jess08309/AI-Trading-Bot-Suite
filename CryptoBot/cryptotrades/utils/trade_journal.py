@@ -60,10 +60,15 @@ def compute_slippage_bps(mid_price_at_fill: float, fill_price: float, side: str)
     return diff / mid_price_at_fill * 10000.0
 
 
+_DATA_DIR = os.environ.get("CRYPTOBOT_DATA_DIR") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"
+)
+
+
 class TradeJournal:
-    def __init__(self, csv_path: str = "data/trade_journal.csv", sqlite_path: str = "data/trade_journal.db"):
-        self.csv_path = csv_path
-        self.sqlite_path = sqlite_path
+    def __init__(self, csv_path: Optional[str] = None, sqlite_path: Optional[str] = None):
+        self.csv_path = csv_path or os.path.join(_DATA_DIR, "trade_journal.csv")
+        self.sqlite_path = sqlite_path or os.path.join(_DATA_DIR, "trade_journal.db")
         self._init_sqlite()
 
     def _init_sqlite(self):
