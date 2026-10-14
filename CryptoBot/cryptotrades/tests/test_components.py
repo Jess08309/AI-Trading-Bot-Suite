@@ -646,3 +646,21 @@ class TestTradeJournal:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestExpectancySelfHealAndPaths:
+    def test_reenable_after_cooldown(self, tmp_path):
+        from datetime import datetime, timedelta, timezone
+        from utils.expectancy_tracker import SymbolExpectancyTracker
+        t = SymbolExpectancyTracker(save_path=str(tmp_path / "s.json"), reenable_after_hours=1)
+        for _ in range(3):
+            t.record_round_trip("LINK", -1.0)
+        assert t.is_disabled("LINK")[0]
+        t._disabled_at["LINK"] = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        assert not t.is_disabled("LINK")[0]
+        assert t.get_consecutive_losses("LINK") == 0
+
+    def test_default_paths_anchored_to_package(self):
+        import os
+        from utils.expectancy_tracker import DEFAULT_SAVE_PATH
+        assert os.path.isabs(DEFAULT_SAVE_PATH)
